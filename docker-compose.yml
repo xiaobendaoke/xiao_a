@@ -1,0 +1,56 @@
+services:
+  napcat:
+    image: mlikiowa/napcat-docker:latest
+    container_name: napcat
+    environment:
+      - NAPCAT_UID=${NAPCAT_UID:-1000}
+      - NAPCAT_GID=${NAPCAT_GID:-1000}
+      - TZ=Asia/Shanghai
+    ports:
+      - "6099:6099"   # NapCat WebUI
+      - "3000:3000"
+      - "3001:3001"
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - ./napcat/qq:/app/.config/QQ
+      - ./napcat/config:/app/napcat/config
+    restart: unless-stopped
+  
+  nonebot:
+    image: python:3.11-slim
+    container_name: nonebot
+    working_dir: /app
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - ./bot:/app
+    extra_hosts:
+      # 让容器能访问宿主机代理（Linux 下默认没有 host.docker.internal）
+      - "host.docker.internal:host-gateway"
+    env_file:
+      - ./bot/.env
+    environment:
+      - ONEBOT_ACCESS_TOKEN=mybot_2026_token
+      - ENVIRONMENT=prod
+      - HOST=0.0.0.0
+      - PORT=8080
+      - TZ=Asia/Shanghai
+    ports:
+      - "8080:8080"
+    command: >
+      bash -c "pip install -U pip -i https://pypi.tuna.tsinghua.edu.cn/simple &&
+               pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple &&
+               python bot.py"
+    restart: unless-stopped
+    
+    
+    depends_on:
+      - gptsovits
+
+  gptsovits:
+    # 这里先放一个“占位”的服务，下一步你把 GPT-SoVITS 放进去再改
+    image: alpine:3.20
+    container_name: gptsovits
+    command: ["sh", "-lc", "echo 'gptsovits placeholder'; sleep 360000"]
+    ports:
+      - "9880:9880"
+    restart: unless-stopped

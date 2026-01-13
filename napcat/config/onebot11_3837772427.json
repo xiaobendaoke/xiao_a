@@ -1,0 +1,25 @@
+{
+  "network": {
+    "httpServers": [],
+    "httpSseServers": [],
+    "httpClients": [],
+    "websocketServers": [],
+    "websocketClients": [
+      {
+        "enable": true,
+        "name": "nonebot",
+        "url": "ws://nonebot:8080/onebot/v11/ws",
+        "reportSelfMessage": false,
+        "messagePostFormat": "string",
+        "token": "mybot_2026_token",
+        "debug": true,
+        "heartInterval": 30000,
+        "reconnectInterval": 30000
+      }
+    ],
+    "plugins": []
+  },
+  "musicSignUrl": "",
+  "enableLocalFile2Url": false,
+  "parseMultMsg": false
+}

@@ -1,0 +1,340 @@
+{
+    "_comment": "https://qqmc.woa.com/manage?projectId=10006&env=online&applicationId=10071&configSetId=106593",
+    "shouldFetchArkToMarkdownMsgTemplate": true,
+    "useMarkdownRender": 1,
+    "supportTemplates": [
+        "md_template.com.tencent.miniapp.lua;miniapp",
+        "md_template.com.tencent.plaintext.lua;feed",
+        "md_template.com.tencent.feed.lua;feed",
+        "md_template.com.tencent.contact.lua;contact",
+        "md_template.com.tencent.video.lua;video"
+    ],
+    "bizName": [],
+    "bizNameV2": [
+        "groupalbum.upload",
+        "groupalbum.interact",
+        "qzone.shuoshuosharepicture",
+        "qzone.albumshare",
+        "qzone.diarysharewithpicture",
+        "qzone.shuoshuoshareonlytext",
+        "qqcircle.main_page_share",
+        "cardshare.cardshare",
+        "bot.card_share",
+        "smallworld.feed",
+        "qzone.vedioshare",
+        "pindao.picforum",
+        "pindao.textforum",
+        "pindao.home",
+        "miniapp.nativeshare",
+        "miniapp.centershare",
+        "babyq.recommendpymyfriend",
+        "qun.share",
+        "group.card",
+        "qqconnect.sdkshare",
+        "qq_signin.share",
+        "xsj.ai_draw_robot",
+        "qbox.share",
+        "gamecenter.tuwen_new",
+        "qevent.eventshare",
+        "gamecenter.beta_game_help",
+        "SpringFestival.sharing",
+        "tianxuan.imgJumpArk",
+        "qqgxh.miniappshare",
+        "tdocs.miniappshare",
+        "qqrelation.blessing",
+        "friends_mutualmark.sign_in",
+        "ai_persona.moment",
+        "qzone.memory-activity-1",
+        "qzone.memory-activity-2",
+        "qzone.photo_restoration",
+        "gamecenter.metadream_tofu",
+        "wanbaH5miniapp.miniprograms",
+        "wzry.xcx",
+        "gamecenter.robotshare",
+        "zhiji.vedio",
+        "gamecenter.nfsmarkshare",
+        "weishi.videoshare",
+        "xsj.share_feed",
+        "videocircle.spring_activity",
+        "shadow.qzone_share_video",
+        "gamecenter.sgame-highlight",
+        "group_album.upload",
+        "qun.invite"
+    ],
+    "needPreloadBizsrcList": [
+        {
+            "appName": "com.tencent.tuwen.lua",
+            "bizName": "qun.invite"
+        },
+        {
+            "appName": "com.tencent.miniapp.lua",
+            "bizName": "groupalbum.upload"
+        },
+        {
+            "appName": "com.tencent.tuwen.lua",
+            "bizName": "groupalbum.interact"
+        },
+        {
+            "appName": "com.tencent.miniapp.lua",
+            "bizName": "qzone.shuoshuosharepicture"
+        },
+        {
+            "appName": "com.tencent.miniapp.lua",
+            "bizName": "qzone.albumshare"
+        },
+        {
+            "appName": "com.tencent.miniapp.lua",
+            "bizName": "qzone.diarysharewithpicture"
+        },
+        {
+            "appName": "com.tencent.tuwen.lua",
+            "bizName": "qzone.shuoshuoshareonlytext"
+        },
+        {
+            "appName": "com.tencent.contact.lua",
+            "bizName": "qqcircle.main_page_share"
+        },
+        {
+            "appName": "com.tencent.contact.lua",
+            "bizName": "cardshare.cardshare"
+        },
+        {
+            "appName": "com.tencent.contact.lua",
+            "bizName": "bot.card_share"
+        },
+        {
+            "appName": "com.tencent.video.lua",
+            "bizName": "smallworld.feed"
+        },
+        {
+            "appName": "com.tencent.miniapp.lua",
+            "bizName": "qzone.vedioshare"
+        },
+        {
+            "appName": "com.tencent.feed.lua",
+            "bizName": "pindao.picforum"
+        },
+        {
+            "appName": "com.tencent.plaintext.lua",
+            "bizName": "pindao.textforum"
+        },
+        {
+            "appName": "com.tencent.contact.lua",
+            "bizName": "pindao.home"
+        },
+        {
+            "appName": "com.tencent.miniapp.lua",
+            "bizName": "miniapp.nativeshare"
+        },
+        {
+            "appName": "com.tencent.contact.lua",
+            "bizName": "miniapp.centershare"
+        },
+        {
+            "appName": "com.tencent.contact.lua",
+            "bizName": "babyq.recommendpymyfriend"
+        },
+        {
+            "appName": "com.tencent.contact.lua",
+            "bizName": "qun.share"
+        },
+        {
+            "appName": "com.tencent.contact.lua",
+            "bizName": "group.card"
+        },
+        {
+            "appName": "com.tencent.tuwen.lua",
+            "bizName": "qqconnect.sdkshare"
+        },
+        {
+            "appName": "com.tencent.tuwen.lua",
+            "bizName": "qq_signin.share"
+        },
+        {
+            "appName": "com.tencent.miniapp.lua",
+            "bizName": "tdocs.sharedoc"
+        },
+        {
+            "appName": "com.tencent.miniapp.lua",
+            "bizName": "xsj.ai_draw_robot"
+        },
+        {
+            "appName": "com.tencent.miniapp.lua",
+            "bizName": "qbox.share"
+        },
+        {
+            "appName": "com.tencent.miniapp.lua",
+            "bizName": "gamecenter.tuwen_new"
+        },
+        {
+            "appName": "com.tencent.miniapp.lua",
+            "bizName": "qevent.eventshare"
+        },
+        {
+            "appName": "com.tencent.miniapp.lua",
+            "bizName": "gamecenter.beta_game_help"
+        },
+        {
+            "appName": "com.tencent.miniapp.lua",
+            "bizName": "SpringFestival.sharing"
+        },
+        {
+            "appName": "com.tencent.miniapp.lua",
+            "bizName": "tianxuan.imgJumpArk"
+        },
+        {
+            "appName": "com.tencent.miniapp.lua",
+            "bizName": "qqgxh.miniappshare"
+        },
+        {
+            "appName": "com.tencent.miniapp.lua",
+            "bizName": "tdocs.miniappshare"
+        },
+        {
+            "appName": "com.tencent.miniapp.lua",
+            "bizName": "qqrelation.blessing"
+        },
+        {
+            "appName": "com.tencent.miniapp.lua",
+            "bizName": "friends_mutualmark.sign_in"
+        },
+        {
+            "appName": "com.tencent.miniapp.lua",
+            "bizName": "ai_persona.moment"
+        },
+        {
+            "appName": "com.tencent.miniapp.lua",
+            "bizName": "qzone.memory-activity-1"
+        },
+        {
+            "appName": "com.tencent.miniapp.lua",
+            "bizName": "qzone.memory-activity-2"
+        },
+        {
+            "appName": "com.tencent.miniapp.lua",
+            "bizName": "qzone.photo_restoration"
+        },
+        {
+            "appName": "com.tencent.miniapp.lua",
+            "bizName": "gamecenter.metadream_tofu"
+        },
+        {
+            "appName": "com.tencent.miniapp.lua",
+            "bizName": "wanbaH5miniapp.miniprograms"
+        },
+        {
+            "appName": "com.tencent.miniapp.lua",
+            "bizName": "wzry.xcx"
+        },
+        {
+            "appName": "com.tencent.video.lua",
+            "bizName": "gamecenter.robotshare"
+        },
+        {
+            "appName": "com.tencent.video.lua",
+            "bizName": "zhiji.vedio"
+        },
+        {
+            "appName": "com.tencent.video.lua",
+            "bizName": "gamecenter.nfsmarkshare"
+        },
+        {
+            "appName": "com.tencent.video.lua",
+            "bizName": "weishi.videoshare"
+        },
+        {
+            "appName": "com.tencent.video.lua",
+            "bizName": "xsj.share_feed"
+        },
+        {
+            "appName": "com.tencent.video.lua",
+            "bizName": "videocircle.spring_activity"
+        },
+        {
+            "appName": "com.tencent.video.lua",
+            "bizName": "shadow.qzone_share_video"
+        },
+        {
+            "appName": "com.tencent.tuwen.lua",
+            "bizName": "gamecenter.sgame-highlight"
+        },
+        {
+            "appName": "com.tencent.feed.lua",
+            "bizName": "group_album.upload"
+        }
+    ],
+    "notNeedCheckWhite": [
+        "testFeed.lua",
+        "test.plaintext"
+    ],
+    "translateRules": {
+        "md_template.com.tencent.plaintext.lua;feed": {
+            "attributes": [
+                {},
+                {
+                    "viewId": "contentText",
+                    "backgroundColor": "bubble_guest"
+                }
+            ]
+        },
+        "md_template.com.tencent.feed.lua;feed": {
+            "layout": [
+                {
+                    "viewId": "app",
+                    "layout": [
+                        {
+                            "viewId": "picDetail",
+                            "layout": [
+                                {},
+                                {
+                                    "viewId": "morePicInfo",
+                                    "marginLeft": 160,
+                                    "layout": [
+                                        {
+                                            "viewId": "morePicBkg",
+                                            "marginLeft": 0
+                                        }
+                                    ]
+                                },
+                                {
+                                    "viewId": "videoInfo",
+                                    "layout": [
+                                        {
+                                            "viewId": "videoIcon",
+                                            "marginLeft": 154
+                                        }
+                                    ]
+                                }
+                            ]
+                        },
+                        {},
+                        {
+                            "viewId": "detail",
+                             "layout": [
+                                {
+                                    "viewId": "topPadding",
+                                    "viewType": "view"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ],
+            "attributes": [
+                {},
+                {
+                    "viewId": "desc",
+                    "standardCSSStyle": {
+                        "-webkit-font-smoothing": "antialiased"
+                    }
+                },
+                {
+                    "viewId": "morePicInfo",
+                    "standardCSSStyle": {
+                        "display": "none"
+                    }
+                }
+            ]
+        }
+    }
+}
