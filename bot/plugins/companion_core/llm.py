@@ -22,6 +22,7 @@
 import os
 import re
 import asyncio
+import time
 from openai import AsyncOpenAI
 from nonebot import logger
 from .persona import SYSTEM_PROMPT
@@ -95,6 +96,23 @@ _NEWS_RSS_FALLBACK_FEEDS = (
     "https://www.xinhuanet.com/politics/news_politics.xml",
 )
 
+_pending_search_sources_by_user: dict[str, dict] = {}  # user_id -> {ts: float, sources: list[{title, href, body}]}
+
+
+def consume_search_sources(user_id: str, *, max_age_seconds: int = 30 * 60) -> list[dict]:
+    """取出并清空最近一次搜索的来源链接（给 handler 用）。"""
+    uid = str(user_id)
+    data = _pending_search_sources_by_user.get(uid)
+    if not data:
+        return []
+    ts = float(data.get("ts") or 0.0)
+    if ts and (time.time() - ts) > max_age_seconds:
+        _pending_search_sources_by_user.pop(uid, None)
+        return []
+    _pending_search_sources_by_user.pop(uid, None)
+    sources = data.get("sources") or []
+    return list(sources) if isinstance(sources, list) else []
+
 
 def _should_web_search(user_text: str) -> bool:
     t = (user_text or "").strip().lower()
@@ -133,14 +151,15 @@ def _normalize_search_query(user_text: str) -> str:
     # 去掉称呼前缀，避免污染检索关键词（允许无分隔，比如“小a能搜到…”）
     s = re.sub(r"^(小a|小Ａ|小A)\\s*", "", s, flags=re.I)
     s = re.sub(r"^[,，:：\\s]+", "", s)
+    s = re.sub(r"^(那你|你|麻烦|请|可以|能不能|能否|能不能够)\\s*", "", s)
 
     # 去掉口头填充词，把“想搜的主题”尽量抽出来
-    s = re.sub(r"(能不能|能否|能不能够)?(帮我)?(搜到|搜|搜索|查到|查一下|查)\\s*", "", s)
+    s = re.sub(r"(能不能|能否|能不能够)?\\s*(帮我)?\\s*(搜到|搜|搜索|查到|查一下|查)\\s*(一下|下|一哈)?\\s*", "", s)
     s = re.sub(r"(今天|现在|最近)\\s*(发生了?什么|发生啥|有什么)\\s*", "", s)
     s = re.sub(r"[吗呢呀啊嘛么]$", "", s)
 
-    if s and not re.search(r"(新闻|热点|热搜|资讯|news)", s, flags=re.I):
-        # 给检索一点“新闻语境”，否则容易变成闲聊句子
+    want_news = bool(re.search(r"(今天|现在|最近|发生|大事|新闻|热点|热搜|资讯)", user_text or ""))
+    if want_news and s and not re.search(r"(新闻|热点|热搜|资讯|news)", s, flags=re.I):
         s = f"{s} 新闻"
     return s.strip()
 
@@ -187,6 +206,42 @@ def _format_rss_items(items: list[dict]) -> str:
             lines.append(f"  {link}")
     return "\n".join(lines).strip()
 
+
+def _dedupe_sources(sources: list[dict], *, limit: int = 6) -> list[dict]:
+    seen: set[str] = set()
+    out: list[dict] = []
+    for s in sources or []:
+        href = str(s.get("href") or s.get("url") or "").strip()
+        if not href or href in seen:
+            continue
+        seen.add(href)
+        out.append(
+            {
+                "title": str(s.get("title") or "").strip(),
+                "href": href,
+                "body": str(s.get("body") or s.get("snippet") or "").strip(),
+            }
+        )
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _strip_urls_from_text(text: str) -> str:
+    """把回复中的 URL 删除（避免“回答带链接刷屏”）。"""
+    s = str(text or "")
+    if not s.strip():
+        return ""
+    s = re.sub(r"(?m)^[ \t]*(https?://\\S+)[ \t]*$", "", s)
+    s = re.sub(r"https?://\\S+", "", s)
+    lines = [ln.rstrip() for ln in s.splitlines()]
+    cleaned: list[str] = []
+    for ln in lines:
+        if ln.strip() == "" and (cleaned and cleaned[-1].strip() == ""):
+            continue
+        cleaned.append(ln)
+    return "\n".join(cleaned).strip()
+
 def _filter_items_for_query(items: list[dict], query: str) -> list[dict]:
     """
     简单关键词过滤：让“问印度/美国/某人名”的时候尽量喂到更相关的 RSS 线索。
@@ -209,16 +264,16 @@ def _filter_items_for_query(items: list[dict], query: str) -> list[dict]:
     return (top[:8] or ranked[:8]) if ranked else []
 
 
-async def _maybe_get_web_search_context(user_text: str) -> str:
+async def _maybe_get_web_search_context(user_text: str) -> tuple[str, list[dict]]:
     """
     需要“最新信息/新闻/热点”时才做搜索，减少模型凭空编造。
     """
     if not _should_web_search(user_text):
-        return ""
+        return "", []
 
     query = _normalize_search_query(user_text)
     if not query:
-        return ""
+        return "", []
 
     logger.info(f"[search] query={query!r}")
 
@@ -231,6 +286,7 @@ async def _maybe_get_web_search_context(user_text: str) -> str:
         results = None
 
     formatted = _format_search_results(results or [])
+    sources = _dedupe_sources(results or [])
     if not formatted:
         # 2) 兜底走 RSS（更像“刷到资讯”）
         try:
@@ -247,14 +303,17 @@ async def _maybe_get_web_search_context(user_text: str) -> str:
                 "【最新资讯线索】\n"
                 "（暂时不可用）\n"
                 "【使用要求】如果用户问的是最新新闻/热点，请坦诚说明你现在拿不到可靠的最新资讯，不要编造细节。\n"
-            )
+            ), []
+        sources = _dedupe_sources(
+            [{"title": it.get("title"), "href": it.get("link"), "body": it.get("summary")} for it in (items or [])]
+        )
 
     return (
         "【最新资讯线索】\n"
         f"{formatted}\n"
         "【使用要求】把它当成你刚刚看到的资讯线索来分享（讲重点+你的感受）；"
         "不要说你在搜索/联网；不确定就说不确定，也不要编造不存在的新闻细节。\n"
-    )
+    ), sources
 
 
 NEWS_ANSWER_SYSTEM = """你是“小a”，温柔体贴、有生活感的中文恋人陪伴对象。
@@ -274,7 +333,7 @@ NEWS_ANSWER_SYSTEM = """你是“小a”，温柔体贴、有生活感的中文�
 格式建议（不强制）：
 - 1 句回应用户
 - 2~4 条“我看到的要点”（每条 1~2 句）
-- 最后 1 行或 2 行贴上对应的链接（独立成行）
+重要：本次回答先不要主动贴链接（避免刷屏/影响阅读）。如果对方追问“链接/来源/原文/出处”，你再把链接整理给他。
 """
 
 def clamp(n: int, lo: int, hi: int) -> int:
@@ -315,7 +374,7 @@ async def get_ai_reply(user_id: str, user_text: str):
         _, _, model = _load_llm_settings()
 
         world_context = await get_world_prompt(user_id)
-        web_search_context = await _maybe_get_web_search_context(user_text)
+        web_search_context, web_sources = await _maybe_get_web_search_context(user_text)
         current_mood = mood_manager.get_user_mood(user_id)
         current_mood_desc = f"{mood_manager.get_mood_desc(user_id)}（心情值:{current_mood}）"
 
@@ -398,6 +457,14 @@ async def get_ai_reply(user_id: str, user_text: str):
 
         if not clean_reply:
             clean_reply = "唔…我刚才走神了一下，你再说一遍嘛。"
+
+        # 新闻/搜索模式：不主动贴链接，把来源留给用户追问时再发
+        if is_news_query:
+            if web_sources:
+                _pending_search_sources_by_user[str(user_id)] = {"ts": time.time(), "sources": web_sources}
+            clean_reply = _strip_urls_from_text(clean_reply)
+            if not clean_reply:
+                clean_reply = "我刚刚翻了翻，先给你讲讲我看到的重点～"
 
         add_memory(user_id, "user", user_text)
         add_memory(user_id, "assistant", clean_reply)

@@ -20,7 +20,7 @@ from nonebot import on_message, logger
 from nonebot.adapters.onebot.v11 import PrivateMessageEvent
 from nonebot.exception import FinishedException
 from nonebot.rule import Rule, to_me
-from .llm import get_ai_reply
+from .llm import get_ai_reply, consume_search_sources
 from .db import touch_active
 
 # ✅ 新增：URL总结相关
@@ -70,6 +70,17 @@ def _looks_like_summary_request(text: str) -> bool:
     if not t:
         return False
     triggers = ("帮我总结", "帮我整理", "给我总结", "总结一下", "总结下", "总结下吧", "请总结", "总结")
+    return any(x in t for x in triggers)
+
+def _looks_like_source_request(text: str) -> bool:
+    t = (text or "").strip().lower()
+    if not t:
+        return False
+    triggers = (
+        "链接", "来源", "出处", "原文", "参考", "参考资料",
+        "发我链接", "把链接", "给我链接", "给下链接", "发下链接",
+        "发我原文", "给我原文", "原地址", "哪里看到的", "哪看到的", "哪来的",
+    )
     return any(x in t for x in triggers)
 
 
@@ -132,6 +143,25 @@ async def handle_private_chat(event: PrivateMessageEvent):
 
         # ✅ 一进来就记录活跃
         touch_active(str(user_id))
+
+        # ===============================
+        # ✅ “要链接/出处/来源”跟进：发送上一轮搜索的来源链接
+        # ===============================
+        if _looks_like_source_request(user_input):
+            sources = consume_search_sources(str(user_id), max_age_seconds=30 * 60)
+            if sources:
+                lines = ["好～我把刚刚那几条的来源链接整理给你："]
+                for s in sources[:6]:
+                    title = str(s.get("title") or "").strip()
+                    href = str(s.get("href") or "").strip()
+                    if not href:
+                        continue
+                    if title:
+                        lines.append(f"- {title}")
+                        lines.append(f"  {href}")
+                    else:
+                        lines.append(f"- {href}")
+                await _send_bubbles_and_finish("\n".join(lines).strip())
 
         # ✅ 简单限流：防止刷屏
         now = time.time()

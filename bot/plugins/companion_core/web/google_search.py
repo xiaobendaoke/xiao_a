@@ -10,6 +10,7 @@
 可选：
 - `GOOGLE_CSE_GL`：国家/地区（如 `cn`/`us`），影响结果地域倾向。
 - `GOOGLE_CSE_HL`：界面语言（如 `zh-CN`），影响结果语言倾向。
+- `GOOGLE_CSE_PROXY`：代理地址（如 `http://host.docker.internal:7890`），用于容器无法直连外网的场景。
 """
 
 from __future__ import annotations
@@ -83,7 +84,14 @@ async def google_cse_search(query: str, max_results: int = 5) -> List[Dict[str, 
 
     timeout = httpx.Timeout(6.0, connect=2.0)
     try:
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        proxy = _env("GOOGLE_CSE_PROXY")
+        # 只给 Google 这条链路单独挂代理，避免影响 pip/其它外部请求
+        async with httpx.AsyncClient(
+            timeout=timeout,
+            follow_redirects=True,
+            proxy=(proxy or None),
+            trust_env=False,
+        ) as client:
             resp = await client.get(_API_URL, params=params)
     except (httpx.TimeoutException, httpx.ConnectError) as e:
         # Google 在部分网络环境可能完全不可达（超时/被阻断）；熔断一段时间避免拖慢每次回复

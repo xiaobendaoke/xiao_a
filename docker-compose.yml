@@ -17,12 +17,16 @@ services:
     restart: unless-stopped
   
   nonebot:
-    image: python:3.11-slim
+    image: ${NONEBOT_IMAGE:-qqbot-nonebot:local}
+    build:
+      context: ./bot
     container_name: nonebot
     working_dir: /app
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - ./bot:/app
+      # 记忆/状态数据库（SQLite），单独挂载保证容器重建不丢
+      - ./bot/plugins/companion_core/data.db:/app/plugins/companion_core/data.db
     extra_hosts:
       # 让容器能访问宿主机代理（Linux 下默认没有 host.docker.internal）
       - "host.docker.internal:host-gateway"
@@ -36,10 +40,7 @@ services:
       - TZ=Asia/Shanghai
     ports:
       - "8080:8080"
-    command: >
-      bash -c "pip install -U pip -i https://pypi.tuna.tsinghua.edu.cn/simple &&
-               pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple &&
-               python bot.py"
+    command: ["python", "bot.py"]
     restart: unless-stopped
     
     

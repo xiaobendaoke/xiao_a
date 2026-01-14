@@ -2,3 +2,21 @@
 bot/.env
 __pycache__/
 *.pyc
+
+# NapCat/QQ runtime data (mounted as volume; do not commit)
+napcat/qq/
+napcat/**/nt_data/
+napcat/**/nt_db/
+napcat/**/log/
+napcat/**/log-cache/
+napcat/**/crash_files/
+*.db
+*.db-shm
+*.db-wal
+*.qqxlog
+*.mmap3
+.DS_Store
+__MACOSX/
+
+# If you intentionally want to version the root DB file
+!/data.db
