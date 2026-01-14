@@ -27,7 +27,7 @@ from datetime import datetime
 from nonebot import logger
 
 # 复用你现有 llm.py 的 client/model
-from .llm import _get_client, _load_llm_settings
+from .llm_client import get_client, load_llm_settings
 
 from .db import get_all_profile
 from .memory import get_chat_history
@@ -68,8 +68,8 @@ URL_DECIDE_SYSTEM = """你是温柔体贴的女友“小a”。现在你只需�
 async def should_summarize_url(user_text: str) -> Dict[str, str]:
     """只做轻量分类，省token"""
     try:
-        client = _get_client()
-        _, _, model = _load_llm_settings()
+        client = get_client()
+        _, _, model = load_llm_settings()
     except Exception as e:
         logger.error(f"[web][decide] init client failed: {e}")
         return {"action": "ASK", "reason": "client_init_failed"}
@@ -122,8 +122,8 @@ WEB_SUMMARY_SYSTEM = """你是“小a”，温柔、体贴、自然、有生活�
 
 async def generate_url_summary(user_id: str, url: str, title: str, content: str) -> Dict[str, Any]:
     try:
-        client = _get_client()
-        _, _, model = _load_llm_settings()
+        client = get_client()
+        _, _, model = load_llm_settings()
     except Exception as e:
         logger.error(f"[web][summary] init client failed: {e}")
         return {
@@ -219,8 +219,8 @@ URL_CONFIRM_SYSTEM = """你是“小a”，温柔体贴、口语自然、有生�
 
 async def generate_url_confirm(user_id: str, user_text: str, url: str) -> Dict[str, Any]:
     try:
-        client = _get_client()
-        _, _, model = _load_llm_settings()
+        client = get_client()
+        _, _, model = load_llm_settings()
     except Exception as e:
         logger.error(f"[web][confirm] init client failed: {e}")
         return {
@@ -331,8 +331,8 @@ def _rss_fallback_text(item: Dict[str, Any]) -> str:
 
 async def generate_rss_share(user_id: str, item: Dict[str, Any]) -> Dict[str, Any]:
     try:
-        client = _get_client()
-        _, _, model = _load_llm_settings()
+        client = get_client()
+        _, _, model = load_llm_settings()
     except Exception as e:
         logger.error(f"[rss][llm] init client failed: {e}")
         return {

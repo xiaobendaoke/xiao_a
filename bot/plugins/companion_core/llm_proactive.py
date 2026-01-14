@@ -28,7 +28,8 @@ from typing import Any
 from nonebot import logger
 
 from .db import get_all_profile
-from .llm import _get_client, _load_llm_settings, extract_tags_and_clean
+from .llm_client import get_client, load_llm_settings
+from .llm_tags import extract_tags_and_clean
 from .memory import get_chat_history
 from .mood import mood_manager
 from .utils.world_info import get_world_prompt
@@ -110,8 +111,8 @@ async def generate_proactive_message(
     last_user_text: str | None,
 ) -> dict[str, Any]:
     try:
-        client = _get_client()
-        _, _, model = _load_llm_settings()
+        client = get_client()
+        _, _, model = load_llm_settings()
     except Exception as e:
         logger.error(f"[proactive][llm] init client failed: {e}")
         return {
