@@ -12,16 +12,23 @@
 - 默认聊天路径：调用 `llm.get_ai_reply()` 获取回复并结束会话。
 """
 
+from __future__ import annotations
+
 import time
 import asyncio
 import re
-import random
-from nonebot import on_message, logger
-from nonebot.adapters.onebot.v11 import PrivateMessageEvent
+from typing import Any
+
+from nonebot import on_message, on_notice, get_bot, logger
+from nonebot.adapters.onebot.v11 import PrivateMessageEvent, Message
 from nonebot.exception import FinishedException
 from nonebot.rule import Rule, to_me
 from .llm import get_ai_reply, consume_search_sources
-from .db import touch_active
+from .db import touch_active, save_profile_item
+from .utils.world_info import get_time_description, get_time_period
+from .utils.typing_speed import typing_delay_seconds
+from .llm_vision import extract_images_and_text, generate_image_reply
+from .memory import add_memory
 
 # ✅ 新增：URL总结相关
 from .llm_web import should_summarize_url, generate_url_summary, generate_url_confirm
@@ -30,8 +37,74 @@ from .web.fetch import fetch_html
 from .db import web_cache_get, web_cache_set
 
 
-# 仅响应私聊消息
-def is_private(event: PrivateMessageEvent):
+RATE_LIMIT_SECONDS = 1.2
+SOURCE_MAX_AGE_SECONDS = 30 * 60
+PENDING_URL_TTL_SECONDS = 10 * 60
+WEB_CACHE_TTL_HOURS = 12
+TYPING_MAX_WAIT_SECONDS = 60.0
+PENDING_IMAGE_TTL_SECONDS = 60.0
+
+# 避免重复触发（简单锁）
+last_user_call_time: dict[int, float] = {}
+
+# URL 确认后的“待总结链接”（内存态，进程重启会丢失）
+pending_url_by_user: dict[int, dict[str, Any]] = {}
+
+# 用户输入状态：用于“对方正在输入”时延迟回复
+_typing_events: dict[str, asyncio.Event] = {}
+
+# 图片待处理：允许“先发图，再发问题”
+pending_image_by_user: dict[int, dict[str, Any]] = {}
+pending_image_task_by_user: dict[int, asyncio.Task] = {}
+
+
+def _get_typing_event(user_id: str | int) -> asyncio.Event:
+    uid = str(user_id)
+    ev = _typing_events.get(uid)
+    if ev is None:
+        ev = asyncio.Event()
+        ev.set()
+        _typing_events[uid] = ev
+    return ev
+
+
+typing_notice = on_notice(priority=2, block=False)
+
+
+@typing_notice.handle()
+async def handle_typing_notice(event):
+    """监听输入状态（对方正在输入），用于延迟回复避免打扰。"""
+    if getattr(event, "notice_type", "") != "notify":
+        return
+    if getattr(event, "sub_type", "") != "input_status":
+        return
+
+    uid = getattr(event, "user_id", None)
+    if uid is None:
+        return
+    status_text = str(getattr(event, "status_text", "") or "")
+    event_type = getattr(event, "event_type", None)
+
+    ev = _get_typing_event(uid)
+    if event_type == 1 or "正在输入" in status_text:
+        ev.clear()
+    elif event_type == 2 or status_text == "":
+        ev.set()
+
+
+async def _wait_if_user_typing(user_id: int) -> None:
+    """若检测到对方正在输入，则等待输入结束或超时再继续。"""
+    ev = _get_typing_event(user_id)
+    if ev.is_set():
+        return
+    try:
+        await asyncio.wait_for(ev.wait(), timeout=TYPING_MAX_WAIT_SECONDS)
+    except asyncio.TimeoutError:
+        ev.set()
+
+
+def is_private(event: PrivateMessageEvent) -> bool:
+    """NoneBot Rule：仅允许私聊事件进入主 handler。"""
     return isinstance(event, PrivateMessageEvent)
 
 
@@ -58,21 +131,18 @@ async def probe_any_message(event):
 
 chat_handler = on_message(rule=Rule(is_private), priority=5, block=True)
 
-# 避免重复触发（简单锁）
-last_user_call_time = {}
-
-# URL 确认后的“待总结链接”（内存态，进程重启会丢失）
-pending_url_by_user = {}
-
 
 def _looks_like_summary_request(text: str) -> bool:
+    """判断用户是否在表达“请帮我总结（上一条链接）”。"""
     t = (text or "").strip().lower()
     if not t:
         return False
     triggers = ("帮我总结", "帮我整理", "给我总结", "总结一下", "总结下", "总结下吧", "请总结", "总结")
     return any(x in t for x in triggers)
 
+
 def _looks_like_source_request(text: str) -> bool:
+    """判断用户是否在追问“来源/链接/原文/出处”。"""
     t = (text or "").strip().lower()
     if not t:
         return False
@@ -84,7 +154,17 @@ def _looks_like_source_request(text: str) -> bool:
     return any(x in t for x in triggers)
 
 
+def _looks_like_time_request(text: str) -> bool:
+    """判断用户是否在询问当前时间。"""
+    t = (text or "").strip()
+    if not t:
+        return False
+    triggers = ("几点", "几点了", "现在几点", "现在是几点", "现在几点呀", "现在几点呢", "现在什么时间")
+    return any(x in t for x in triggers)
+
+
 def _bubble_parts(text: str) -> list[str]:
+    """把要发送的文本拆成“气泡段落”，模拟真人分段发送。"""
     s = str(text or "").strip()
     if not s:
         return []
@@ -101,23 +181,252 @@ def _bubble_parts(text: str) -> list[str]:
     return parts
 
 
-def _bubble_pause_seconds(text: str) -> float:
-    n = len((text or "").strip())
-    # 让消息“更像人”：短句也留一点停顿，长句稍微更久
-    base = 0.75 + min(1.0, n / 30) * 0.75
-    jitter = random.uniform(0.05, 0.25)
-    return min(2.2, base + jitter)
+def _maybe_learn_city_from_user_text(user_id: int, user_input: str) -> None:
+    """从用户发言里尝试“记住所在地城市”，用于后续天气查询与早晨提醒。"""
+    t = (user_input or "").strip()
+    if not t:
+        return
+
+    m = re.match(r"^(?:我\\s*)?(?:现在\\s*)?(?:人在|在)\\s*([\\u4e00-\\u9fff]{2,10})(?:市)?[。.!！]?$", t)
+    if not m:
+        m = re.match(r"^(?:我\\s*)?在\\s*([\\u4e00-\\u9fff]{2,10})(?:市)?[。.!！]?$", t)
+    if not m:
+        return
+
+    city = (m.group(1) or "").strip()
+    if city in ("这里", "那边", "这边", "家", "公司", "学校", "宿舍", "单位", "附近", "本地", "当地"):
+        return
+    if "天气" in t:
+        # “北京天气”这种更像提问，不当作“我在北京”的陈述来记
+        return
+
+    try:
+        save_profile_item(str(user_id), "所在城市", city)
+        logger.info(f"[chat] learned city uid={user_id} city={city!r}")
+    except Exception as e:
+        logger.warning(f"[chat] save city failed uid={user_id}: {e}")
 
 
-async def _send_bubbles_and_finish(text: str) -> None:
+async def _send_bubbles_and_finish(text: str, *, user_id: int | None = None) -> None:
+    """按气泡分段发送，并在最后一段 `finish()` 结束当前会话。"""
     parts = _bubble_parts(text)
     if not parts:
         await chat_handler.finish("唔…我刚刚走神了一下，你再说一遍嘛。")
 
     for p in parts[:-1]:
+        if user_id is not None:
+            await _wait_if_user_typing(user_id)
+        await asyncio.sleep(typing_delay_seconds(p, user_id=user_id))
         await chat_handler.send(p)
-        await asyncio.sleep(_bubble_pause_seconds(p))
-    await chat_handler.finish(parts[-1])
+    last = parts[-1]
+    if user_id is not None:
+        await _wait_if_user_typing(user_id)
+    await asyncio.sleep(typing_delay_seconds(last, user_id=user_id))
+    await chat_handler.finish(last)
+
+
+def _format_sources_message(sources: list[dict]) -> str:
+    """把搜索来源列表整理成用户可读的多行文本（用于“要链接/出处”场景）。"""
+    lines = ["好～我把刚刚那几条的来源链接整理给你："]
+    for s in (sources or [])[:6]:
+        title = str(s.get("title") or "").strip()
+        href = str(s.get("href") or "").strip()
+        if not href:
+            continue
+        if title:
+            lines.append(f"- {title}")
+            lines.append(f"  {href}")
+        else:
+            lines.append(f"- {href}")
+    return "\n".join(lines).strip()
+
+
+def _cancel_pending_image_task(user_id: int) -> None:
+    task = pending_image_task_by_user.pop(user_id, None)
+    if task and not task.done():
+        task.cancel()
+
+
+async def _send_private_bubbles(user_id: int, text: str) -> None:
+    """在后台任务里私聊发送（不依赖 matcher 上下文）。"""
+    bot = get_bot()
+    parts = _bubble_parts(text)
+    if not parts:
+        return
+    if len(parts) > 4:
+        parts = parts[:3] + [" ".join(parts[3:])]
+
+    for p in parts:
+        await _wait_if_user_typing(user_id)
+        await asyncio.sleep(typing_delay_seconds(p, user_id=user_id))
+        await bot.send_private_msg(user_id=user_id, message=p)
+
+
+async def _image_idle_reply_task(user_id: int, urls: list[str], ts: float) -> None:
+    """若用户发图后 60s 未追问，则自由回复一次。"""
+    try:
+        await asyncio.sleep(PENDING_IMAGE_TTL_SECONDS)
+        pending = pending_image_by_user.get(user_id)
+        if not pending or float(pending.get("ts", 0)) != float(ts):
+            return
+
+        reply = await generate_image_reply(str(user_id), list(urls), "")
+        add_memory(str(user_id), "user", "（发送了一张图片）")
+        add_memory(str(user_id), "assistant", reply)
+        pending_image_by_user.pop(user_id, None)
+        await _send_private_bubbles(user_id, reply)
+    except asyncio.CancelledError:
+        return
+    except Exception as e:
+        logger.error(f"[vision] idle reply failed uid={user_id}: {e}")
+
+async def _handle_time_request_if_any(user_id: int, user_input: str) -> None:
+    """若用户询问当前时间，直接基于系统时间回复并结束会话。"""
+    if not _looks_like_time_request(user_input):
+        return
+    now_desc = get_time_description()
+    period = get_time_period()
+    await _send_bubbles_and_finish(f"现在是 {now_desc}。\n大概是{period}啦。", user_id=user_id)
+
+
+async def _handle_source_request_if_any(user_id: int, user_input: str) -> None:
+    """若用户在追问来源，尝试发送上一轮新闻检索的来源链接（如果存在则结束会话）。"""
+    if not _looks_like_source_request(user_input):
+        return
+    sources = consume_search_sources(str(user_id), max_age_seconds=SOURCE_MAX_AGE_SECONDS)
+    if not sources:
+        return
+    await _send_bubbles_and_finish(_format_sources_message(sources), user_id=user_id)
+
+
+async def _handle_image_request_if_any(user_id: int, message: Message, user_input: str, now: float) -> bool:
+    """处理图片理解：支持“先发图后发问”，返回是否已处理/已延后。"""
+    image_urls, user_text = extract_images_and_text(message)
+
+    # 1) 本次消息带图
+    if image_urls:
+        _cancel_pending_image_task(user_id)
+        if user_text:
+            reply = await generate_image_reply(str(user_id), image_urls, user_text)
+            user_mem = user_text.strip() if user_text else "（发送了一张图片）"
+            add_memory(str(user_id), "user", user_mem)
+            add_memory(str(user_id), "assistant", reply)
+            await _send_bubbles_and_finish(reply, user_id=user_id)
+            return True
+
+        # 只有图片：先缓存，等用户下一条文字追问
+        pending_image_by_user[user_id] = {"urls": image_urls, "ts": now}
+        pending_image_task_by_user[user_id] = asyncio.create_task(
+            _image_idle_reply_task(user_id, list(image_urls), float(now))
+        )
+        logger.info(f"[vision] cached image uid={user_id} count={len(image_urls)}")
+        return True
+
+    # 2) 本次消息没带图，但可能是“图后追问”
+    pending = pending_image_by_user.get(user_id)
+    if pending and (now - float(pending.get("ts", 0))) < PENDING_IMAGE_TTL_SECONDS:
+        cached_urls = pending.get("urls") or []
+        if cached_urls and user_input:
+            _cancel_pending_image_task(user_id)
+            pending_image_by_user.pop(user_id, None)
+            reply = await generate_image_reply(str(user_id), list(cached_urls), user_input)
+            add_memory(str(user_id), "user", user_input)
+            add_memory(str(user_id), "assistant", reply)
+            await _send_bubbles_and_finish(reply, user_id=user_id)
+            return True
+
+    # 超时清理
+    if pending and (now - float(pending.get("ts", 0))) >= PENDING_IMAGE_TTL_SECONDS:
+        _cancel_pending_image_task(user_id)
+        pending_image_by_user.pop(user_id, None)
+
+    return False
+
+
+def _check_and_update_rate_limit(user_id: int, now: float) -> bool:
+    """简单限流：同一用户两次触发间隔过短则丢弃本次消息。"""
+    last_time = last_user_call_time.get(user_id, 0.0)
+    if now - last_time < RATE_LIMIT_SECONDS:
+        logger.debug(f"[chat] rate-limited uid={user_id}")
+        return False
+    last_user_call_time[user_id] = now
+    return True
+
+
+async def _get_url_readable_content(url: str) -> tuple[str, str]:
+    """获取 URL 的（标题、正文），优先读 SQLite 缓存，未命中则抓取并缓存。"""
+    cached = web_cache_get(url)
+    if cached:
+        return cached["title"], cached["content"]
+
+    html = await fetch_html(url)
+    parsed = parse_readable(html, url=url)
+    title, content = parsed.get("title", ""), parsed.get("text", "")
+    web_cache_set(url, title, content, ttl_hours=WEB_CACHE_TTL_HOURS)
+    return title, content
+
+
+async def _handle_summary_followup_if_any(user_id: int, user_input: str, now: float) -> None:
+    """处理“总结/帮我总结”的跟进：对上一条 ASK 的链接做总结（成功则结束会话）。"""
+    urls = extract_urls(user_input)
+    if urls:
+        return
+    if not _looks_like_summary_request(user_input):
+        return
+
+    pending = pending_url_by_user.get(user_id)
+    if not pending:
+        return
+    if (now - float(pending.get("ts", 0))) >= PENDING_URL_TTL_SECONDS:
+        return
+
+    url = str(pending.get("url") or "").strip()
+    if not url:
+        return
+
+    logger.info(f"[chat] url-followup uid={user_id} url={url}")
+    pending_url_by_user.pop(user_id, None)
+
+    title, content = await _get_url_readable_content(url)
+    msg = await generate_url_summary(str(user_id), url, title, content)
+    text = (msg.get("text") or "").strip()
+    if text:
+        await _send_bubbles_and_finish(text, user_id=user_id)
+
+
+async def _handle_url_auto_if_any(user_id: int, user_input: str, now: float) -> None:
+    """处理“消息里带 URL”的场景：LLM 决定 ASK/SUMMARIZE/IGNORE，必要时结束会话。"""
+    urls = extract_urls(user_input)
+    if not urls:
+        return
+
+    decision = await should_summarize_url(user_input)
+    action = str(decision.get("action", "ASK")).upper()
+    url = urls[0]
+    logger.info(f"[chat] url-detect uid={user_id} action={action} url={url}")
+
+    if action == "IGNORE":
+        return  # 继续走普通聊天
+
+    if action == "ASK":
+        pending_url_by_user[user_id] = {"url": url, "ts": now}
+        msg = await generate_url_confirm(str(user_id), user_input, url)
+        text = (msg.get("text") or "").strip()
+        if not text:
+            text = (
+                "我看到你发了个链接～\n"
+                "你是想让我帮你整理重点，还是想问里面某个点呀？\n"
+                "想要我总结的话回我一句“总结”就行。"
+            )
+        await _send_bubbles_and_finish(text, user_id=user_id)
+
+    # SUMMARIZE（或其它异常值，按总结处理）
+    pending_url_by_user.pop(user_id, None)
+    title, content = await _get_url_readable_content(url)
+    msg = await generate_url_summary(str(user_id), url, title, content)
+    text = (msg.get("text") or "").strip()
+    if text:
+        await _send_bubbles_and_finish(text, user_id=user_id)
 
 
 group_hint = on_message(rule=to_me(), priority=9, block=False)
@@ -125,7 +434,7 @@ group_hint = on_message(rule=to_me(), priority=9, block=False)
 
 @group_hint.handle()
 async def handle_group_hint(event):
-    # 如果是群聊里 @ 到我，给一个明确引导，避免用户以为“没回复”
+    """群聊被 @ 时的引导：提示用户转到私聊，避免误以为机器人失效。"""
     if not hasattr(event, "group_id"):
         return
     await group_hint.finish("我现在主要在私聊里陪你聊～你私聊我一句就好。")
@@ -133,9 +442,11 @@ async def handle_group_hint(event):
 
 @chat_handler.handle()
 async def handle_private_chat(event: PrivateMessageEvent):
+    """私聊主入口：按优先级依次处理来源追问、限流、链接总结与普通聊天。"""
     try:
         user_id = event.user_id
-        user_input = str(event.get_message()).strip()
+        message = event.get_message()
+        user_input = str(message).strip()
         if not user_input:
             return
 
@@ -144,104 +455,37 @@ async def handle_private_chat(event: PrivateMessageEvent):
         # ✅ 一进来就记录活跃
         touch_active(str(user_id))
 
-        # ===============================
-        # ✅ “要链接/出处/来源”跟进：发送上一轮搜索的来源链接
-        # ===============================
-        if _looks_like_source_request(user_input):
-            sources = consume_search_sources(str(user_id), max_age_seconds=30 * 60)
-            if sources:
-                lines = ["好～我把刚刚那几条的来源链接整理给你："]
-                for s in sources[:6]:
-                    title = str(s.get("title") or "").strip()
-                    href = str(s.get("href") or "").strip()
-                    if not href:
-                        continue
-                    if title:
-                        lines.append(f"- {title}")
-                        lines.append(f"  {href}")
-                    else:
-                        lines.append(f"- {href}")
-                await _send_bubbles_and_finish("\n".join(lines).strip())
+        # ✅ 尝试记住用户所在地（用户回答城市时不依赖 LLM 标签）
+        _maybe_learn_city_from_user_text(user_id, user_input)
 
-        # ✅ 简单限流：防止刷屏
+        # 1) “要链接/出处/来源”跟进：发送上一轮搜索的来源链接
+        await _handle_source_request_if_any(user_id, user_input)
+
+        # 2) 简单限流：防止刷屏
         now = time.time()
-        last_time = last_user_call_time.get(user_id, 0)
-        if now - last_time < 1.2:
-            logger.debug(f"[chat] rate-limited uid={user_id}")
+        if not _check_and_update_rate_limit(user_id, now):
             return
-        last_user_call_time[user_id] = now
 
-        # ===============================
-        # ✅ “总结/帮我总结”跟进：对上一条 ASK 的链接做总结
-        # ===============================
-        urls = extract_urls(user_input)
-        if not urls and _looks_like_summary_request(user_input):
-            pending = pending_url_by_user.get(user_id)
-            if pending and (now - float(pending.get("ts", 0))) < 10 * 60:
-                url = str(pending.get("url") or "").strip()
-                if url:
-                    logger.info(f"[chat] url-followup uid={user_id} url={url}")
-                    pending_url_by_user.pop(user_id, None)
-                    cached = web_cache_get(url)
-                    if cached:
-                        title, content = cached["title"], cached["content"]
-                    else:
-                        html = await fetch_html(url)
-                        parsed = parse_readable(html, url=url)
-                        title, content = parsed.get("title", ""), parsed.get("text", "")
-                        web_cache_set(url, title, content, ttl_hours=12)
+        # 3) 输入中检测：等待对方输入结束，避免打扰
+        await _wait_if_user_typing(user_id)
 
-                    msg = await generate_url_summary(str(user_id), url, title, content)
-                    text = (msg.get("text") or "").strip()
-                    if text:
-                        await _send_bubbles_and_finish(text)
+        # 4) 图片理解：优先处理图片（或缓存等待下一条文字）
+        handled = await _handle_image_request_if_any(user_id, message, user_input, now)
+        if handled:
+            return
 
-        # ===============================
-        # ✅ URL 自动处理：LLM判断是否需要总结
-        # ===============================
-        urls = urls or extract_urls(user_input)
-        if urls:
-            decision = await should_summarize_url(user_input)
-            action = decision.get("action", "ASK")
-            url = urls[0]
-            logger.info(f"[chat] url-detect uid={user_id} action={action} url={url}")
+        # 5) 时间询问：直接返回系统时间（避免模型乱编）
+        await _handle_time_request_if_any(user_id, user_input)
 
-            if action == "IGNORE":
-                pass  # 继续走普通聊天
+        # 6) “总结”跟进：对上一条 ASK 的链接做总结
+        await _handle_summary_followup_if_any(user_id, user_input, now)
 
-            elif action == "ASK":
-                pending_url_by_user[user_id] = {"url": url, "ts": now}
-                msg = await generate_url_confirm(str(user_id), user_input, url)
-                text = (msg.get("text") or "").strip()
-                if not text:
-                    text = (
-                        "我看到你发了个链接～\n"
-                        "你是想让我帮你整理重点，还是想问里面某个点呀？\n"
-                        "想要我总结的话回我一句“总结”就行。"
-                    )
-                await _send_bubbles_and_finish(text)
+        # 7) URL 自动处理：LLM 判断是否要总结/确认
+        await _handle_url_auto_if_any(user_id, user_input, now)
 
-            else:  # SUMMARIZE
-                pending_url_by_user.pop(user_id, None)
-                cached = web_cache_get(url)
-                if cached:
-                    title, content = cached["title"], cached["content"]
-                else:
-                    html = await fetch_html(url)
-                    parsed = parse_readable(html, url=url)
-                    title, content = parsed.get("title", ""), parsed.get("text", "")
-                    web_cache_set(url, title, content, ttl_hours=12)
-
-                msg = await generate_url_summary(str(user_id), url, title, content)
-                text = (msg.get("text") or "").strip()
-                if text:
-                    await _send_bubbles_and_finish(text)
-
-        # ===============================
-        # ✅ 默认走原有聊天逻辑
-        # ===============================
+        # 8) 默认走普通聊天逻辑
         reply = await get_ai_reply(str(user_id), user_input)
-        await _send_bubbles_and_finish(reply)
+        await _send_bubbles_and_finish(reply, user_id=user_id)
 
     except FinishedException:
         raise

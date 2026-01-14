@@ -29,10 +29,19 @@ from .llm_news import (
     strip_urls_from_text,
 )
 from .llm_tags import extract_tags_and_clean
+from .llm_weather import WEATHER_QA_SYSTEM
 
 # 兼容旧引用（llm_web/llm_proactive 可能还没改时）
 _get_client = get_client
 _load_llm_settings = load_llm_settings
+
+
+def _is_weather_query(user_text: str) -> bool:
+    t = (user_text or "").strip()
+    if not t:
+        return False
+    triggers = ("天气", "温度", "下雨", "降雨", "雨吗", "要带伞", "穿什么", "冷不冷", "热不热", "气温")
+    return any(x in t for x in triggers)
 
 
 async def get_ai_reply(user_id: str, user_text: str):
@@ -40,7 +49,7 @@ async def get_ai_reply(user_id: str, user_text: str):
         client = get_client()
         _, _, model = load_llm_settings()
 
-        world_context = await get_world_prompt(user_id)
+        world_context = await get_world_prompt(user_id, user_text=user_text)
         web_search_context, web_sources = await maybe_get_web_search_context(user_text)
         current_mood = mood_manager.get_user_mood(user_id)
         current_mood_desc = f"{mood_manager.get_mood_desc(user_id)}（心情值:{current_mood}）"
@@ -65,6 +74,8 @@ async def get_ai_reply(user_id: str, user_text: str):
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         if is_news_query:
             messages.append({"role": "system", "content": NEWS_ANSWER_SYSTEM})
+        if _is_weather_query(user_text):
+            messages.append({"role": "system", "content": WEATHER_QA_SYSTEM})
 
         messages.append(
             {
@@ -76,7 +87,8 @@ async def get_ai_reply(user_id: str, user_text: str):
                     f"【记忆指令】：当用户明确提供长期稳定信息时，回复末尾另起一行输出 "
                     f"[UPDATE_PROFILE:键=值]（可多条）。每次回复末尾另起一行输出 [MOOD_CHANGE:x]。\n"
                     f"【格式要求】：以上标签必须单独占一行，且放在消息最后，不要和正文写在同一行。\n"
-                    f"【现实感知要求】：如果现实环境感知里“天气可用性=不可用”，请坦诚说明拿不到实时天气，不要猜。"
+                    f"【现实感知要求】：如果现实环境感知里“天气可用性=不可用”，请坦诚说明拿不到实时天气，不要猜。\n"
+                    f"【现实感知要求】：现实环境感知里给了“时间/时段”，不要把白天说成凌晨/深夜。"
                 ),
             }
         )

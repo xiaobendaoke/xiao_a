@@ -108,6 +108,16 @@ def init_db():
             )
         """)
 
+        # 7) ✅ 天气早报去重（避免一天重复推送）
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS weather_daily_push (
+                user_id TEXT,
+                day TEXT,
+                pushed_ts INTEGER DEFAULT 0,
+                PRIMARY KEY (user_id, day)
+            )
+        """)
+
 
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_state_last_active ON user_state(last_active_ts)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_state_cooldown ON user_state(cooldown_until_ts)")
@@ -421,6 +431,29 @@ async def get_rss_user_targets():
             return [r[0] for r in cur.fetchall()]
     return await asyncio.to_thread(_sync)
 
+
+async def get_idle_user_states(limit: int = 200) -> list[tuple[str, int]]:
+    """获取处于“可主动互动”的用户与其最后活跃时间戳。"""
+    limit = int(limit) if limit else 200
+
+    def _sync() -> list[tuple[str, int]]:
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT user_id, last_active_ts
+                FROM user_state
+                WHERE proactive_enabled=1
+                  AND last_active_ts > 0
+                ORDER BY last_active_ts ASC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            return [(str(uid), int(ts or 0)) for uid, ts in cur.fetchall()]
+
+    return await asyncio.to_thread(_sync)
+
 async def claim_rss_slot(user_id: str, now: datetime, cooldown_minutes: int = 120) -> bool:
     """
     RSS推送冷却：
@@ -471,3 +504,86 @@ async def claim_rss_slot(user_id: str, now: datetime, cooldown_minutes: int = 12
 
     await asyncio.to_thread(_sync2)
     return True
+
+
+# ================================
+# ✅ 天气提醒：目标用户 / 当日去重
+# ================================
+_CITY_KEYS = ("所在城市", "所在地", "城市", "位置", "当前城市", "常住地", "家乡")
+
+
+async def get_weather_user_targets() -> list[tuple[str, str]]:
+    """
+    返回需要天气提醒的用户列表：[(user_id, city), ...]
+
+    规则：
+    - 默认只给 `user_state.proactive_enabled=1` 的用户推送；
+    - 用户画像里存在“城市/所在地/所在城市...”任一字段才视为可推送。
+    """
+
+    def _sync() -> list[tuple[str, str]]:
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.cursor()
+            cur.execute(
+                f"""
+                SELECT us.user_id, up.key, up.value
+                FROM user_state us
+                JOIN user_profile up ON up.user_id = us.user_id
+                WHERE us.proactive_enabled=1
+                  AND up.key IN ({",".join(["?"] * len(_CITY_KEYS))})
+                """,
+                _CITY_KEYS,
+            )
+            rows = cur.fetchall()
+
+        # 按 key 优先级给每个 user_id 选一个 city
+        priority = {k: i for i, k in enumerate(_CITY_KEYS)}
+        best: dict[str, tuple[int, str]] = {}
+        for uid, k, v in rows:
+            uid = str(uid)
+            city = str(v or "").strip()
+            if not city:
+                continue
+            rank = priority.get(str(k), 999)
+            prev = best.get(uid)
+            if prev is None or rank < prev[0]:
+                best[uid] = (rank, city)
+
+        return [(uid, city) for uid, (_, city) in best.items()]
+
+    return await asyncio.to_thread(_sync)
+
+
+async def weather_pushed_today(user_id: str, day: date) -> bool:
+    """检查某用户今天是否已推送过天气早报。"""
+    uid = str(user_id)
+    day_str = day.isoformat()
+
+    def _sync() -> bool:
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT 1 FROM weather_daily_push WHERE user_id=? AND day=? LIMIT 1",
+                (uid, day_str),
+            )
+            return cur.fetchone() is not None
+
+    return await asyncio.to_thread(_sync)
+
+
+async def weather_mark_pushed(user_id: str, day: date) -> None:
+    """标记某用户今日已推送天气早报。"""
+    uid = str(user_id)
+    day_str = day.isoformat()
+    now_ts = int(datetime.now().timestamp())
+
+    def _sync() -> None:
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "INSERT OR REPLACE INTO weather_daily_push (user_id, day, pushed_ts) VALUES (?,?,?)",
+                (uid, day_str, now_ts),
+            )
+            conn.commit()
+
+    await asyncio.to_thread(_sync)

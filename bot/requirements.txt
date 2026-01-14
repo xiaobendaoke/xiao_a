@@ -3,6 +3,7 @@ nonebot-adapter-onebot>=2.4.0
 openai
 nonebot-plugin-apscheduler
 httpx
+pillow
 feedparser>=6.0.0
 trafilatura
 readability-lxml

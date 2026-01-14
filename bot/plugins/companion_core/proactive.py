@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import random
 from datetime import datetime, timedelta
 
 from nonebot import get_bot, logger
@@ -34,6 +33,7 @@ from .db import (
     mark_proactive_sent,
 )
 from .llm_proactive import generate_proactive_message
+from .utils.typing_speed import typing_delay_seconds
 
 
 def _env_int(name: str, default: int) -> int:
@@ -50,13 +50,6 @@ PROACTIVE_MAX_PER_DAY = _env_int("PROACTIVE_MAX_PER_DAY", 2)
 PROACTIVE_COOLDOWN_MINUTES = _env_int("PROACTIVE_COOLDOWN_MINUTES", 240)
 
 
-def _bubble_pause_seconds(text: str) -> float:
-    n = len((text or "").strip())
-    base = 0.55 + min(1.0, n / 80) * 2
-    jitter = random.uniform(0.0, 0.25)
-    return min(1.8, base + jitter)
-
-
 async def _send_bubbles(bot: Bot, user_id: int, text: str) -> None:
     parts = [p.strip() for p in (text or "").splitlines() if p.strip()]
     if not parts:
@@ -65,9 +58,11 @@ async def _send_bubbles(bot: Bot, user_id: int, text: str) -> None:
         parts = parts[:3] + [" ".join(parts[3:])]
 
     for p in parts[:-1]:
+        await asyncio.sleep(typing_delay_seconds(p, user_id=user_id))
         await bot.send_private_msg(user_id=user_id, message=p)
-        await asyncio.sleep(_bubble_pause_seconds(p))
-    await bot.send_private_msg(user_id=user_id, message=parts[-1])
+    last = parts[-1]
+    await asyncio.sleep(typing_delay_seconds(last, user_id=user_id))
+    await bot.send_private_msg(user_id=user_id, message=last)
 
 
 async def _handle_one_candidate(bot: Bot, cand: ProactiveCandidate) -> bool:
