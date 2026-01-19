@@ -48,10 +48,22 @@ services:
       - gptsovits
 
   gptsovits:
-    # 这里先放一个“占位”的服务，下一步你把 GPT-SoVITS 放进去再改
-    image: alpine:3.20
+    image: xxxxrt666/gpt-sovits:latest-cu128-lite
     container_name: gptsovits
-    command: ["sh", "-lc", "echo 'gptsovits placeholder'; sleep 360000"]
+    volumes:
+      - ./gpt-sovits:/workspace/GPT-SoVITS
+      - ./gpt-sovits/tools/asr/models:/workspace/models/asr_models
+      - ./gpt-sovits/tools/uvr5/uvr5_weights:/workspace/models/uvr5_weights
+    environment:
+      - is_half=true
+      - TZ=Asia/Shanghai
     ports:
       - "9880:9880"
+    shm_size: "16g"
     restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: [gpu]
