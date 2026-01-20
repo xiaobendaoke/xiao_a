@@ -35,6 +35,7 @@ from .web.rss import fetch_feeds
 from .web.utils import sha1
 from .db import rss_seen, rss_mark_seen, get_idle_user_states, claim_rss_slot
 from .llm_web import generate_rss_share
+from .memory import add_memory
 from .utils.typing_speed import typing_delay_seconds
 
 # ✅ 你可以在这里配置 RSS 源
@@ -167,6 +168,7 @@ async def _push_when_idle(tag: str):
             # 5) 私聊发送
             await asyncio.sleep(typing_delay_seconds(text, user_id=uid))
             await bot.call_api("send_private_msg", user_id=int(uid), message=text)
+            add_memory(str(uid), "assistant", text)
             logger.info(f"[rss] sent uid={uid} title={chosen.get('title','')!r}")
 
         except Exception as e:

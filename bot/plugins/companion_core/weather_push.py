@@ -22,6 +22,7 @@ from nonebot_plugin_apscheduler import scheduler
 
 from .db import get_weather_user_targets, weather_mark_pushed, weather_pushed_today
 from .llm_weather import generate_morning_weather_text
+from .memory import add_memory
 from .utils.open_meteo import geocode_city, fetch_forecast, summarize_today_weather
 from .utils.typing_speed import typing_delay_seconds
 
@@ -79,6 +80,7 @@ async def _push_weather_once(now: datetime):
 
             await asyncio.sleep(typing_delay_seconds(text, user_id=uid))
             await bot.call_api("send_private_msg", user_id=int(uid), message=text)
+            add_memory(str(uid), "assistant", text)
             await weather_mark_pushed(uid, today)
             logger.info(f"[weather] sent uid={uid} city={city!r}")
         except Exception as e:

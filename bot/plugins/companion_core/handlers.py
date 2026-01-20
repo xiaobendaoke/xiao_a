@@ -17,10 +17,11 @@ from __future__ import annotations
 import time
 import asyncio
 import re
+import os
 from typing import Any
 
 from nonebot import on_message, on_notice, get_bot, logger
-from nonebot.adapters.onebot.v11 import PrivateMessageEvent, Message
+from nonebot.adapters.onebot.v11 import PrivateMessageEvent, Message, MessageSegment
 from nonebot.exception import FinishedException
 from nonebot.rule import Rule, to_me
 from .llm import get_ai_reply, consume_search_sources
@@ -35,6 +36,9 @@ from .llm_web import should_summarize_url, generate_url_summary, generate_url_co
 from .web.parse import extract_urls, parse_readable
 from .web.fetch import fetch_html
 from .db import web_cache_get, web_cache_set
+from .voice.asr import transcribe_audio_file
+from .voice.io import fetch_record_from_event
+from .voice.tts import synthesize_record_base64
 
 
 RATE_LIMIT_SECONDS = 1.2
@@ -160,6 +164,27 @@ def _looks_like_time_request(text: str) -> bool:
     if not t:
         return False
     triggers = ("几点", "几点了", "现在几点", "现在是几点", "现在几点呀", "现在几点呢", "现在什么时间")
+    return any(x in t for x in triggers)
+
+
+def _env_flag(name: str) -> bool:
+    v = (os.getenv(name) or "").strip()
+    v = v.split()[0] if v else ""
+    return v.lower() in ("1", "true", "yes", "y", "on")
+
+
+def _looks_like_voice_reply_request(text: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return False
+    if _env_flag("VOICE_REPLY_ON_TEXT"):
+        return True
+    keywords = (os.getenv("VOICE_REPLY_KEYWORDS") or "").strip()
+    if keywords:
+        ks = [k.strip() for k in re.split(r"[,，\\s]+", keywords) if k.strip()]
+        return any(k in t for k in ks)
+    # 默认仅在用户明显要求语音时触发
+    triggers = ("发语音", "用语音", "语音回复", "语音回我", "发个语音")
     return any(x in t for x in triggers)
 
 
@@ -446,6 +471,46 @@ async def handle_private_chat(event: PrivateMessageEvent):
     try:
         user_id = event.user_id
         message = event.get_message()
+        bot = get_bot()
+
+        # 0) 语音消息：QQ 语音 → ASR → LLM → TTS → QQ 语音
+        record_seg = next((seg for seg in message if getattr(seg, "type", "") == "record"), None)
+        if record_seg is not None:
+            touch_active(str(user_id))
+            now = time.time()
+            if not _check_and_update_rate_limit(user_id, now):
+                return
+            await _wait_if_user_typing(user_id)
+
+            try:
+                audio_path = await fetch_record_from_event(bot, record_seg)
+                asr_text = (await transcribe_audio_file(audio_path)).strip()
+                if not asr_text:
+                    await chat_handler.finish("我刚刚没听清…你可以再说一遍吗？")
+
+                logger.info(f"[voice] uid={user_id} asr={asr_text[:200]!r}")
+                reply_text = await get_ai_reply(str(user_id), asr_text)
+                try:
+                    record_b64 = await synthesize_record_base64(reply_text)
+                    await chat_handler.finish(MessageSegment.record(file=record_b64))
+                except FinishedException:
+                    # finish() 会通过 FinishedException 中断 handler，这里属于正常流程
+                    raise
+                except Exception as e:
+                    logger.exception(f"[voice] tts failed uid={user_id}: {e}")
+                    extra = ""
+                    if "QWEN_TTS_VOICE" in str(e):
+                        extra = (
+                            "\n\n（我这边还没配置语音音色，所以只能先发文字。\n"
+                            "请在 bot/.env 里设置：QWEN_TTS_VOICE=你复刻出来的 output.voice，然后重启 nonebot。）"
+                        )
+                    await _send_bubbles_and_finish((reply_text or "").strip() + extra, user_id=user_id)
+            except FinishedException:
+                raise
+            except Exception as e:
+                logger.exception(f"[voice] failed uid={user_id}: {e}")
+                await chat_handler.finish("语音处理失败了…你发文字我也可以聊，或者稍后再试试。")
+
         user_input = str(message).strip()
         if not user_input:
             return
@@ -485,7 +550,17 @@ async def handle_private_chat(event: PrivateMessageEvent):
 
         # 8) 默认走普通聊天逻辑
         reply = await get_ai_reply(str(user_id), user_input)
-        await _send_bubbles_and_finish(reply, user_id=user_id)
+        if _looks_like_voice_reply_request(user_input):
+            try:
+                record_b64 = await synthesize_record_base64(reply)
+                await chat_handler.finish(MessageSegment.record(file=record_b64))
+            except FinishedException:
+                raise
+            except Exception as e:
+                logger.exception(f"[voice] tts failed(uid={user_id}) on text: {e}")
+                await _send_bubbles_and_finish(reply, user_id=user_id)
+        else:
+            await _send_bubbles_and_finish(reply, user_id=user_id)
 
     except FinishedException:
         raise

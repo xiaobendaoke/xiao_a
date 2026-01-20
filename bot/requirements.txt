@@ -8,3 +8,4 @@ feedparser>=6.0.0
 trafilatura
 readability-lxml
 beautifulsoup4
+dashscope>=1.23.9

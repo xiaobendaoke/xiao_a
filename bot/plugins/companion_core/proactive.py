@@ -33,6 +33,7 @@ from .db import (
     mark_proactive_sent,
 )
 from .llm_proactive import generate_proactive_message
+from .memory import add_memory
 from .utils.typing_speed import typing_delay_seconds
 
 
@@ -94,6 +95,7 @@ async def _handle_one_candidate(bot: Bot, cand: ProactiveCandidate) -> bool:
             return False
 
         await _send_bubbles(bot, cand.user_id, text)
+        add_memory(str(cand.user_id), "assistant", text)
         await mark_proactive_sent(cand.user_id, now=now, cooldown_minutes=PROACTIVE_COOLDOWN_MINUTES)
         logger.info(
             f"[proactive] sent to {cand.user_id} idle={idle_hours}h intent={data.get('intent')} reason={data.get('reason')}"

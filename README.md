@@ -97,3 +97,27 @@ sudo systemctl restart docker
 
 你使用的 Docker Hub Token 权限不够。请创建带 `Read & Write` 权限的 PAT，或使用账号密码登录后再 `docker push`。
 
+## 8. 语音对话（QQ 语音 → ASR → 文本 → TTS → QQ 语音）
+
+当前仅支持私聊语音：你给小a发语音，小a会“听写→理解→语音回复”。
+
+需要在 `bot/.env` 里配置：
+- `DASHSCOPE_API_KEY`：百炼 DashScope Key（注意不要泄露）
+- `DASHSCOPE_REGION`：`cn`（北京）或 `intl`（新加坡）
+- `QWEN_TTS_VOICE`：你用 `scripts/qwen_voice_clone.py` 得到的 `output.voice`
+- `QWEN_TTS_MODEL`：默认 `qwen3-tts-vc-realtime-2025-11-27`
+- `DASHSCOPE_ASR_MODEL`：默认 `paraformer-realtime-v2`
+
+可选：让语音更自然的参数（不填就用默认）
+- `QWEN_TTS_SPEECH_RATE`：语速（0.5~2.0），例如 `0.95`
+- `QWEN_TTS_PITCH_RATE`：音高（0.5~2.0），例如 `1.05`
+- `QWEN_TTS_VOLUME`：音量（0~100），例如 `55`
+- `QWEN_TTS_ENABLE_TN`：文本规范化（`1/0`）
+- `QWEN_TTS_LANGUAGE_TYPE`：语种（如 `zh/en/auto`）
+
+说明：语音回复会自动清理括号动作/旁白（如“（戳戳屏幕）”）再送进 TTS，避免读出这些内容。
+
+改完后重启：
+```bash
+docker compose up -d --build nonebot
+```
