@@ -30,6 +30,7 @@ from .utils.world_info import get_time_description, get_time_period
 from .utils.typing_speed import typing_delay_seconds
 from .llm_vision import extract_images_and_text, generate_image_reply
 from .memory import add_memory
+from .mood import mood_manager
 
 # ✅ 新增：URL总结相关
 from .llm_web import should_summarize_url, generate_url_summary, generate_url_confirm
@@ -489,9 +490,10 @@ async def handle_private_chat(event: PrivateMessageEvent):
                     await chat_handler.finish("我刚刚没听清…你可以再说一遍吗？")
 
                 logger.info(f"[voice] uid={user_id} asr={asr_text[:200]!r}")
-                reply_text = await get_ai_reply(str(user_id), asr_text)
+                reply_text = await get_ai_reply(str(user_id), asr_text, voice_mode=True)
                 try:
-                    record_b64 = await synthesize_record_base64(reply_text)
+                    mood = mood_manager.get_user_mood(str(user_id))
+                    record_b64 = await synthesize_record_base64(reply_text, mood=mood)
                     await chat_handler.finish(MessageSegment.record(file=record_b64))
                 except FinishedException:
                     # finish() 会通过 FinishedException 中断 handler，这里属于正常流程
@@ -549,10 +551,12 @@ async def handle_private_chat(event: PrivateMessageEvent):
         await _handle_url_auto_if_any(user_id, user_input, now)
 
         # 8) 默认走普通聊天逻辑
-        reply = await get_ai_reply(str(user_id), user_input)
-        if _looks_like_voice_reply_request(user_input):
+        voice_wanted = _looks_like_voice_reply_request(user_input)
+        reply = await get_ai_reply(str(user_id), user_input, voice_mode=voice_wanted)
+        if voice_wanted:
             try:
-                record_b64 = await synthesize_record_base64(reply)
+                mood = mood_manager.get_user_mood(str(user_id))
+                record_b64 = await synthesize_record_base64(reply, mood=mood)
                 await chat_handler.finish(MessageSegment.record(file=record_b64))
             except FinishedException:
                 raise

@@ -26,6 +26,15 @@ def _env(name: str, default: str = "") -> str:
     v = (os.getenv(name) or default).strip()
     return v.split()[0] if v else ""
 
+
+def _clamp_float(v: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, float(v)))
+
+
+def _clamp_int(v: int, lo: int, hi: int) -> int:
+    return max(lo, min(hi, int(v)))
+
+
 def _env_float(name: str, default: float | None = None) -> float | None:
     v = _env(name)
     if not v:
@@ -88,6 +97,52 @@ def clean_for_tts(text: str) -> str:
     s = re.sub(r"\\n{3,}", "\n\n", s)
     s = s.strip()
     return s
+
+
+def _ensure_pause_punctuation(text: str, mood: int | None) -> str:
+    s = (text or "").strip()
+    if not s:
+        return ""
+
+    # 换行作为“强停顿”，但确保每行末尾有标点
+    lines = [ln.strip() for ln in s.splitlines()]
+    out: list[str] = []
+    end_punct = ("。", "！", "？", "…", ".", "!", "?")
+    for ln in lines:
+        if not ln:
+            continue
+        if ln.endswith(end_punct):
+            out.append(ln)
+        else:
+            out.append(ln + ("！" if (mood is not None and mood >= 30) else "。"))
+    s = "\n".join(out).strip()
+
+    # 把三个点/六个点统一成中文省略号（更像口语停顿）
+    s = s.replace("......", "……").replace("...", "……")
+    return s
+
+
+def _mood_to_tts_overrides(
+    mood: int | None,
+    *,
+    base_speech_rate: float,
+    base_pitch_rate: float,
+    base_volume: int,
+) -> tuple[float, float, int]:
+    if mood is None:
+        return base_speech_rate, base_pitch_rate, base_volume
+
+    # 归一化到 [-1, 1]，让参数变化不过分夸张
+    m = _clamp_float(float(mood) / 60.0, -1.0, 1.0)
+
+    speech_rate = base_speech_rate * (1.0 + 0.12 * m)
+    pitch_rate = base_pitch_rate * (1.0 + 0.10 * m)
+    volume = base_volume + int(round(10.0 * m))
+
+    speech_rate = _clamp_float(speech_rate, 0.5, 2.0)
+    pitch_rate = _clamp_float(pitch_rate, 0.5, 2.0)
+    volume = _clamp_int(volume, 0, 100)
+    return speech_rate, pitch_rate, volume
 
 
 def _ws_url(region: str) -> str:
@@ -154,7 +209,16 @@ def _wav_to_mp3(wav_path: Path, mp3_path: Path) -> None:
     subprocess.run(cmd, check=True)
 
 
-def _synthesize_pcm_sync(*, text: str, voice: str, model: str, region: str) -> bytes:
+def _synthesize_pcm_sync(
+    *,
+    text: str,
+    voice: str,
+    model: str,
+    region: str,
+    speech_rate: float | None,
+    pitch_rate: float | None,
+    volume: int | None,
+) -> bytes:
     import dashscope  # type: ignore
     from dashscope.audio.qwen_tts_realtime import (  # type: ignore
         AudioFormat,
@@ -186,9 +250,9 @@ def _synthesize_pcm_sync(*, text: str, voice: str, model: str, region: str) -> b
         voice=voice,
         response_format=AudioFormat.PCM_24000HZ_MONO_16BIT,
         mode="server_commit",
-        volume=_env_int("QWEN_TTS_VOLUME"),
-        speech_rate=_env_float("QWEN_TTS_SPEECH_RATE"),
-        pitch_rate=_env_float("QWEN_TTS_PITCH_RATE"),
+        volume=volume,
+        speech_rate=speech_rate,
+        pitch_rate=pitch_rate,
         enable_tn=_env_bool("QWEN_TTS_ENABLE_TN"),
         language_type=_env("QWEN_TTS_LANGUAGE_TYPE") or None,
     )
@@ -206,7 +270,7 @@ def _synthesize_pcm_sync(*, text: str, voice: str, model: str, region: str) -> b
     return bytes(collector.buf)
 
 
-async def synthesize_record_base64(text: str) -> str:
+async def synthesize_record_base64(text: str, *, mood: int | None = None) -> str:
     """用 Qwen realtime TTS 合成语音，并返回 OneBot 可用的 base64:// 音频（mp3）。"""
     voice = _env("QWEN_TTS_VOICE")
     if not voice:
@@ -214,11 +278,34 @@ async def synthesize_record_base64(text: str) -> str:
     model = _env("QWEN_TTS_MODEL", "qwen3-tts-vc-realtime-2025-11-27")
     region = _env("DASHSCOPE_REGION", "cn")
 
-    clean_text = clean_for_tts(text)
+    clean_text = _ensure_pause_punctuation(clean_for_tts(text), mood)
     if not clean_text:
         raise RuntimeError("Empty TTS text after cleaning")
 
-    pcm = await asyncio.to_thread(_synthesize_pcm_sync, text=clean_text, voice=voice, model=model, region=region)
+    base_speech_rate = _env_float("QWEN_TTS_SPEECH_RATE", 1.0) or 1.0
+    base_pitch_rate = _env_float("QWEN_TTS_PITCH_RATE", 1.0) or 1.0
+    base_volume = _env_int("QWEN_TTS_VOLUME", 50) or 50
+    speech_rate, pitch_rate, volume = _mood_to_tts_overrides(
+        mood,
+        base_speech_rate=base_speech_rate,
+        base_pitch_rate=base_pitch_rate,
+        base_volume=base_volume,
+    )
+
+    logger.info(
+        f"[tts] mood={mood} speech_rate={speech_rate:.2f} pitch_rate={pitch_rate:.2f} volume={volume}"
+    )
+
+    pcm = await asyncio.to_thread(
+        _synthesize_pcm_sync,
+        text=clean_text,
+        voice=voice,
+        model=model,
+        region=region,
+        speech_rate=speech_rate,
+        pitch_rate=pitch_rate,
+        volume=volume,
+    )
 
     with tempfile.TemporaryDirectory(prefix="qqbot_tts_") as td:
         wav_path = Path(td) / "out.wav"

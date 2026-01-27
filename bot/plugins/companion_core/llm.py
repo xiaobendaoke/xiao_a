@@ -44,7 +44,18 @@ def _is_weather_query(user_text: str) -> bool:
     return any(x in t for x in triggers)
 
 
-async def get_ai_reply(user_id: str, user_text: str):
+VOICE_REPLY_SYSTEM = (
+    "你现在会用“语音”回复用户。\n"
+    "要求：\n"
+    "- 只输出适合直接朗读的中文口语（像在和人聊天），句子短一点，多停顿。\n"
+    "- 尽量不要用括号动作/旁白（不要出现“（……）”“【……】”这类舞台指示）。\n"
+    "- 少用长段落/长从句，避免项目符号/编号列表。\n"
+    "- 可以适度使用“嗯/好啦/那个/唔”等语气词，但不要过量。\n"
+    "- 避免输出链接；如必须提到链接，用“我发你链接”这类话术代替。\n"
+)
+
+
+async def get_ai_reply(user_id: str, user_text: str, *, voice_mode: bool = False):
     try:
         client = get_client()
         _, _, model = load_llm_settings()
@@ -72,6 +83,8 @@ async def get_ai_reply(user_id: str, user_text: str):
         # ✅ system 拆成两条：persona & 动态上下文
         # “新闻/搜索”类提问用更强约束，强制基于【最新资讯线索】作答，避免模型嘴甜乱编。
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        if voice_mode:
+            messages.append({"role": "system", "content": VOICE_REPLY_SYSTEM})
         if is_news_query:
             messages.append({"role": "system", "content": NEWS_ANSWER_SYSTEM})
         if _is_weather_query(user_text):

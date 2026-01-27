@@ -3,7 +3,6 @@
 本项目用 `docker-compose` 一键启动：
 - `napcat`：提供 OneBot 协议与 WebUI
 - `nonebot`：机器人本体（本仓库的 `./bot`）
-- `gptsovits`：占位服务（你可以自行替换为实际 GPT-SoVITS）
 
 ## 1. 前置条件
 

@@ -14,6 +14,11 @@
 
 可配置项：
 - `DEFAULT_FEEDS`：订阅源列表（可按需增删）。
+- `RSSHUB_BASE`：可选的 RSSHub 镜像地址（设置后会自动加入微博/知乎热榜等“高热度源”）。
+- `RSS_GITHUB_TRENDING_ENABLED`：是否抓取 GitHub Trending（默认 1）。
+- `RSS_GITHUB_TRENDING_SINCE`：GitHub Trending 周期（daily/weekly/monthly，默认 daily）。
+- `RSS_V2EX_HOT_ENABLED`：是否抓取 V2EX 热门（默认 1）。
+- `GOSSIP_KEYWORDS`：娱乐八卦过滤关键词（命中则跳过）。
 - `QUIET_START/QUIET_END`：免打扰时间窗口。
 - `RSS_IDLE_ENABLED`：是否启用“空闲触发”模式（默认 1）。
 - `RSS_IDLE_CHECK_INTERVAL_MINUTES`：检查间隔（默认 6）。
@@ -32,23 +37,63 @@ require("nonebot_plugin_apscheduler")
 from nonebot_plugin_apscheduler import scheduler
 
 from .web.rss import fetch_feeds
+from .web.trending import fetch_github_trending, fetch_v2ex_hot
 from .web.utils import sha1
 from .db import rss_seen, rss_mark_seen, get_idle_user_states, claim_rss_slot
 from .llm_web import generate_rss_share
 from .memory import add_memory
 from .utils.typing_speed import typing_delay_seconds
 
-# ✅ 你可以在这里配置 RSS 源
-DEFAULT_FEEDS = [
-    # ⚠️ 默认不再依赖 rsshub：不少环境里 `rsshub.app` 直连会网络不可达/超时，导致一直“拉不到条目”。
-    # 这些源在多数国内网络可直连，且内容适合“像人一样分享”。
-    "https://www.thepaper.cn/rss",         # 澎湃新闻（综合）
-    "https://www.huxiu.com/rss/0.xml",     # 虎嗅（商业/科技）
-    "https://www.36kr.com/feed",           # 36氪（创业/科技）
-    "https://www.ithome.com/rss/",         # IT之家（科技）
-    "https://sspai.com/feed",              # 少数派（效率/生活方式）
-    "https://www.solidot.org/index.rss",   # Solidot（科技资讯）
+GOSSIP_KEYWORDS = [
+    "明星",
+    "娱乐圈",
+    "八卦",
+    "粉丝",
+    "演唱会",
+    "主演",
+    "恋情",
+    "出轨",
+    "录制",
+    "综艺",
+    "流量",
+    "剧组",
+    "绯闻",
+    "私生饭",
 ]
+
+
+def _is_gossip_item(item: dict) -> bool:
+    title = (item.get("title") or "").strip()
+    summary = (item.get("summary") or item.get("description") or "").strip()
+    text = f"{title} {summary}".lower()
+    return any((kw or "").lower() in text for kw in GOSSIP_KEYWORDS if kw)
+
+
+# ✅ 你可以在这里配置 RSS 源（默认不依赖 rsshub）
+_BASE_FEEDS = [
+    # --- 时政/综合热点 ---
+    "https://www.thepaper.cn/rss",          # 澎湃新闻（综合）
+    "http://www.ftchinese.com/rss/news",    # FT中文网（全球时政/经济）
+    # --- 科技/商业热点 ---
+    "https://www.36kr.com/feed",            # 36氪（创业/科技）
+    "https://www.huxiu.com/rss/0.xml",      # 虎嗅（商业/科技）
+    "https://www.ithome.com/rss/",          # IT之家（科技）
+    "https://sspai.com/feed",               # 少数派（效率/生活方式）
+    "https://www.solidot.org/index.rss",    # Solidot（科技资讯）
+    # --- 国际热点/高讨论度 ---
+    "https://news.ycombinator.com/rss",     # Hacker News（技术/趋势）
+]
+
+# 可选：提供 RSSHub 镜像后再启用“高热度榜单”（rsshub.app 可能触发 Cloudflare challenge）
+RSSHUB_BASE = (os.getenv("RSSHUB_BASE") or "").strip().rstrip("/")
+_RSSHUB_FEEDS: list[str] = []
+if RSSHUB_BASE:
+    _RSSHUB_FEEDS = [
+        f"{RSSHUB_BASE}/weibo/hotmap",   # 微博热搜榜
+        f"{RSSHUB_BASE}/zhihu/hotlist",  # 知乎热榜
+    ]
+
+DEFAULT_FEEDS = [*_RSSHUB_FEEDS, *_BASE_FEEDS]
 
 # 可选：通过环境变量覆盖（逗号/空格/换行分隔）
 _env_feeds = (os.getenv("RSS_FEEDS") or "").strip()
@@ -74,6 +119,9 @@ RSS_IDLE_ENABLED = _env_int("RSS_IDLE_ENABLED", 1) == 1
 RSS_IDLE_CHECK_INTERVAL_MINUTES = _env_int("RSS_IDLE_CHECK_INTERVAL_MINUTES", 6)
 RSS_IDLE_MINUTES_MIN = _env_int("RSS_IDLE_MINUTES_MIN", 60)
 RSS_IDLE_MINUTES_MAX = _env_int("RSS_IDLE_MINUTES_MAX", 180)
+RSS_GITHUB_TRENDING_ENABLED = _env_int("RSS_GITHUB_TRENDING_ENABLED", 1) == 1
+RSS_GITHUB_TRENDING_SINCE = (os.getenv("RSS_GITHUB_TRENDING_SINCE") or "daily").strip().lower()
+RSS_V2EX_HOT_ENABLED = _env_int("RSS_V2EX_HOT_ENABLED", 1) == 1
 
 
 def in_quiet_hours(now: datetime) -> bool:
@@ -109,15 +157,33 @@ async def _push_when_idle(tag: str):
         logger.info("[rss] skip: no connected bot")
         return
 
-    # 1) 拉 RSS
+    # 1) 拉 RSS（额外补充“趋势源”：GitHub Trending / V2EX 热门）
     try:
-        items = await fetch_feeds(DEFAULT_FEEDS, limit_each=10)
+        tasks = []
+        if RSS_GITHUB_TRENDING_ENABLED:
+            tasks.append(fetch_github_trending(limit=8, since=RSS_GITHUB_TRENDING_SINCE))
+        if RSS_V2EX_HOT_ENABLED:
+            tasks.append(fetch_v2ex_hot(limit=12))
+        tasks.append(fetch_feeds(DEFAULT_FEEDS, limit_each=10))
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        items = []
+        for r in results:
+            if isinstance(r, Exception):
+                logger.warning(f"[rss] fetch exception: {r}")
+                continue
+            items.extend(r or [])
     except Exception as e:
         logger.error(f"[rss] fetch feeds failed: {e}")
         return
 
     if not items:
         logger.warning("[rss] skip: empty feed items")
+        return
+
+    items = [it for it in items if not _is_gossip_item(it)]
+    if not items:
+        logger.warning("[rss] skip: all items filtered (gossip)")
         return
 
     # 2) 获取推送目标用户（带 last_active_ts）
