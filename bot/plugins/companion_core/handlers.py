@@ -31,12 +31,14 @@ from .utils.typing_speed import typing_delay_seconds
 from .llm_vision import extract_images_and_text, generate_image_reply
 from .memory import add_memory
 from .mood import mood_manager
+from .stock import parse_stock_id, build_stock_context
 
 # ✅ 新增：URL总结相关
 from .llm_web import should_summarize_url, generate_url_summary, generate_url_confirm
 from .web.parse import extract_urls, parse_readable
 from .web.fetch import fetch_html
 from .db import web_cache_get, web_cache_set
+from .llm_stock import generate_stock_chat_text
 from .voice.asr import transcribe_audio_file
 from .voice.io import fetch_record_from_event
 from .voice.tts import synthesize_record_base64
@@ -237,7 +239,9 @@ async def _send_bubbles_and_finish(text: str, *, user_id: int | None = None) -> 
     """按气泡分段发送，并在最后一段 `finish()` 结束当前会话。"""
     parts = _bubble_parts(text)
     if not parts:
-        await chat_handler.finish("唔…我刚刚走神了一下，你再说一遍嘛。")
+        msg = "唔…我刚刚走神了一下，你再说一遍嘛。"
+        await asyncio.sleep(typing_delay_seconds(msg, user_id=user_id))
+        await chat_handler.finish(msg)
 
     for p in parts[:-1]:
         if user_id is not None:
@@ -313,6 +317,74 @@ async def _handle_time_request_if_any(user_id: int, user_input: str) -> None:
     now_desc = get_time_description()
     period = get_time_period()
     await _send_bubbles_and_finish(f"现在是 {now_desc}。\n大概是{period}啦。", user_id=user_id)
+
+
+async def _handle_stock_query_if_any(user_id: int, user_input: str) -> None:
+    """私聊命令：`查股 688110` / `股票 688110`。"""
+    t = (user_input or "").strip()
+    if not t:
+        return
+    if not (t.startswith("查股") or t.startswith("股票")):
+        return
+
+    sid = parse_stock_id(t)
+    if sid is None:
+        await _send_bubbles_and_finish("你发我一个 6 位股票代码就行啦。\n比如：查股 688110", user_id=user_id)
+
+    ctx = await build_stock_context(sid)
+    quote = ctx.get("quote") or {}
+    profile = ctx.get("profile") or {}
+    anns = ctx.get("announcements") or []
+
+    # 兜底：行情失败时不走 LLM，直接提示
+    if isinstance(quote, dict) and quote.get("error"):
+        await _send_bubbles_and_finish("我刚刚去查了一下。\n但是行情接口这会儿没给到数据。\n你等我一会儿再查一次好不好？", user_id=user_id)
+
+    name = str((quote.get("name") or profile.get("name") or sid.code) or "").strip()
+    try:
+        pct = float(quote.get("pct_chg") or 0.0)
+    except Exception:
+        pct = 0.0
+    amount_yi = str(quote.get("amount_yi") or "").strip()
+
+    ann_titles = []
+    for a in anns[:3] if isinstance(anns, list) else []:
+        title = str((a or {}).get("title") or "").strip()
+        if title:
+            ann_titles.append(title)
+
+    llm_payload = {
+        "user_id": str(user_id),
+        "stock": {"name": name, "code": sid.code, "ts_code": sid.ts_code},
+        "quote": {"pct_chg": pct, "amount_yi": amount_yi, "price": quote.get("price")},
+        "company_profile": {
+            "industry": str(profile.get("industry") or "").strip(),
+            "intro": str(profile.get("main_business") or profile.get("intro") or "").strip(),
+        },
+        "announcements": [{"title": t} for t in ann_titles],
+    }
+
+    text = (await generate_stock_chat_text(llm_payload)).strip()
+    if not text:
+        # fallback：保持聊天短句
+        first = f"【查股】{name}({sid.code}) {pct:+.2f}%"
+        if ann_titles:
+            reason = f"今天可能和“{ann_titles[0]}”有关。"
+        else:
+            reason = "今天标题证据不足，更像情绪/资金走动。"
+        hot = f"成交挺热的（成交额大概 {amount_yi}）。" if amount_yi else "今天交易还挺热的。"
+        intro = str(profile.get("main_business") or profile.get("intro") or "").strip()
+        if intro:
+            intro = " ".join(intro.replace("\u3000", " ").split())
+            if len(intro) > 70:
+                intro = intro[:69] + "…"
+        else:
+            intro = "这家公司做的业务我这边资料还不太全。"
+        text = "\n".join([first, intro, reason, hot, "明天就先看板块热度能不能接住，再留意有没有新公告。"])
+
+    add_memory(str(user_id), "user", user_input)
+    add_memory(str(user_id), "assistant", text)
+    await _send_bubbles_and_finish(text, user_id=user_id)
 
 
 async def _handle_source_request_if_any(user_id: int, user_input: str) -> None:
@@ -463,7 +535,9 @@ async def handle_group_hint(event):
     """群聊被 @ 时的引导：提示用户转到私聊，避免误以为机器人失效。"""
     if not hasattr(event, "group_id"):
         return
-    await group_hint.finish("我现在主要在私聊里陪你聊～你私聊我一句就好。")
+    msg = "我现在主要在私聊里陪你聊～你私聊我一句就好。"
+    await asyncio.sleep(typing_delay_seconds(msg, user_id=getattr(event, "user_id", None)))
+    await group_hint.finish(msg)
 
 
 @chat_handler.handle()
@@ -487,7 +561,9 @@ async def handle_private_chat(event: PrivateMessageEvent):
                 audio_path = await fetch_record_from_event(bot, record_seg)
                 asr_text = (await transcribe_audio_file(audio_path)).strip()
                 if not asr_text:
-                    await chat_handler.finish("我刚刚没听清…你可以再说一遍吗？")
+                    msg = "我刚刚没听清…你可以再说一遍吗？"
+                    await asyncio.sleep(typing_delay_seconds(msg, user_id=user_id))
+                    await chat_handler.finish(msg)
 
                 logger.info(f"[voice] uid={user_id} asr={asr_text[:200]!r}")
                 reply_text = await get_ai_reply(str(user_id), asr_text, voice_mode=True)
@@ -511,7 +587,9 @@ async def handle_private_chat(event: PrivateMessageEvent):
                 raise
             except Exception as e:
                 logger.exception(f"[voice] failed uid={user_id}: {e}")
-                await chat_handler.finish("语音处理失败了…你发文字我也可以聊，或者稍后再试试。")
+                msg = "语音处理失败了…你发文字我也可以聊，或者稍后再试试。"
+                await asyncio.sleep(typing_delay_seconds(msg, user_id=user_id))
+                await chat_handler.finish(msg)
 
         user_input = str(message).strip()
         if not user_input:
@@ -550,6 +628,9 @@ async def handle_private_chat(event: PrivateMessageEvent):
         # 7) URL 自动处理：LLM 判断是否要总结/确认
         await _handle_url_auto_if_any(user_id, user_input, now)
 
+        # 7.5) 股票查询（私聊命令）
+        await _handle_stock_query_if_any(user_id, user_input)
+
         # 8) 默认走普通聊天逻辑
         voice_wanted = _looks_like_voice_reply_request(user_input)
         reply = await get_ai_reply(str(user_id), user_input, voice_mode=voice_wanted)
@@ -570,4 +651,7 @@ async def handle_private_chat(event: PrivateMessageEvent):
         raise
     except Exception as e:
         logger.exception(e)
-        await chat_handler.finish("我这边刚刚出错了…你再发一次我试试，好不好？")
+        msg = "我这边刚刚出错了…你再发一次我试试，好不好？"
+        # 这里可能没有 user_id（极少数异常），兜底传 None
+        await asyncio.sleep(typing_delay_seconds(msg, user_id=locals().get("user_id", None)))
+        await chat_handler.finish(msg)

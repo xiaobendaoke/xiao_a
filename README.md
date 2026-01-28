@@ -49,6 +49,20 @@ docker compose logs -f napcat
 - NapCat WebUI：`http://localhost:6099`
 - NoneBot：`http://localhost:8080`
 
+## 4.1 STM32 / 外部入口（HTTP API，可选）
+
+用于把“小a”的对话能力暴露为一个受保护的 HTTP 接口，方便 STM32MP157 等设备用 `curl`/Python 调用。
+
+接口：
+- `POST /api/chat`
+- Header：`X-API-Key: <STM32_API_KEY>`
+- Body(JSON)：`{"text":"...", "user_id":"...", "source":"stm32"}`
+- Response(JSON)：`{"reply":"..."}`
+
+注意：
+- **要和 QQ 上下文连续**：`user_id` 需要填你在 QQ 私聊触发时对应的 `event.user_id`（同一个桶才能共享记忆/情绪/画像）。
+- `STM32_API_KEY` 在 `bot/.env` 里配置；未配置时接口会返回 503（fail-closed）。
+
 ## 5. 记忆/数据库（SQLite）
 
 机器人“记忆/状态”默认存储在：
@@ -56,7 +70,25 @@ docker compose logs -f napcat
 
 `docker-compose.yml` 已把该文件单独挂载进容器（重建容器不会丢数据）。建议把它当作运行时数据做备份，而不是长期提交到 Git 历史里。
 
-## 6. 使用 Docker Hub 镜像运行（可选）
+## 6. 财经日报（A股收盘复盘）
+
+特点：
+- 只私聊发送，不发群聊
+- 只给“已订阅用户”推送（避免刷屏）
+- 独立数据库：`bot/plugins/finance_daily/finance.db`（不与 `companion_core/data.db` 共用）
+
+私聊命令（仅私聊生效）：
+- `开启财经日报`：写入订阅表 enabled=1，回复“已开启”
+- `关闭财经日报`：enabled=0，回复“已关闭”
+- `财经日报状态`：回复当前是否开启 + 每天几点推送
+- `财经日报 强制`：只对当前用户跑一次并回发（不影响订阅）
+- （排障）`财经状态`：查看最近一次任务状态与当前配置
+
+环境变量（见 `bot/.env.example`）：
+- `FIN_DAILY_ENABLED`、`FIN_DAILY_RUN_HOUR`/`FIN_DAILY_RUN_MINUTE`、`FIN_DAILY_TOP_N`
+- `FIN_DAILY_DATA_PROVIDER`（推荐 `sina`；若可用也可选 `eastmoney`，都不依赖 Tushare 权限）
+
+## 7. 使用 Docker Hub 镜像运行（可选）
 
 你也可以不本地构建，直接拉取镜像（你发布到 Docker Hub 的 `latest`）：
 
@@ -72,9 +104,9 @@ docker pull xiaobendaoke/xiao_a:latest
 NONEBOT_IMAGE=xiaobendaoke/xiao_a:latest docker compose up -d --no-build nonebot
 ```
 
-## 7. 常见问题
+## 8. 常见问题
 
-### 7.1 Docker Hub 推送/登录网络失败
+### 8.1 Docker Hub 推送/登录网络失败
 
 如果你在国内网络环境，需要让 Docker daemon 走代理（例如 Clash `127.0.0.1:7890`）。示例（Ubuntu/systemd）：
 
@@ -92,11 +124,11 @@ sudo systemctl daemon-reload
 sudo systemctl restart docker
 ```
 
-### 7.2 `authentication required - access token has insufficient scopes`
+### 8.2 `authentication required - access token has insufficient scopes`
 
 你使用的 Docker Hub Token 权限不够。请创建带 `Read & Write` 权限的 PAT，或使用账号密码登录后再 `docker push`。
 
-## 8. 语音对话（QQ 语音 → ASR → 文本 → TTS → QQ 语音）
+## 9. 语音对话（QQ 语音 → ASR → 文本 → TTS → QQ 语音）
 
 当前仅支持私聊语音：你给小a发语音，小a会“听写→理解→语音回复”。
 

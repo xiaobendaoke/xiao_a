@@ -12,6 +12,7 @@
 from __future__ import annotations
 from typing import List, Dict, Any, Optional
 import asyncio
+import os
 import time
 
 import httpx
@@ -24,19 +25,39 @@ _UA = "Mozilla/5.0 (compatible; qqbot-stack/1.0; +https://example.invalid)"
 _CACHE_TTL_SECONDS = 180.0
 _feed_cache: dict[str, tuple[float, list[dict]]] = {}  # feed_url -> (expires_ts, items)
 
+def _rss_proxy() -> str | None:
+    for k in (
+        "RSS_PROXY",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "ALL_PROXY",
+        "https_proxy",
+        "http_proxy",
+        "all_proxy",
+    ):
+        v = (os.getenv(k) or "").strip()
+        if v:
+            return v
+    return None
+
 
 async def _fetch_feed_bytes(client: httpx.AsyncClient, url: str) -> Optional[bytes]:
-    try:
-        resp = await client.get(
-            url,
-            headers={
-                "User-Agent": _UA,
-                "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml, */*;q=0.8",
-            },
-        )
-    except Exception as e:
-        logger.warning(f"[rss] fetch failed url={url!r}: {e}")
-        return None
+    for i in range(2):
+        try:
+            resp = await client.get(
+                url,
+                headers={
+                    "User-Agent": _UA,
+                    "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml, */*;q=0.8",
+                },
+            )
+            break
+        except Exception as e:
+            if i < 1:
+                await asyncio.sleep(0.3)
+            else:
+                logger.opt(exception=e).warning(f"[rss] fetch failed url={url!r}")
+                return None
 
     if resp.status_code >= 400:
         logger.warning(f"[rss] fetch bad status={resp.status_code} url={url!r}")
@@ -118,7 +139,12 @@ async def fetch_feeds(feed_urls: List[str], limit_each: int = 8) -> List[Dict[st
         return out
 
     timeout = httpx.Timeout(8.0, connect=4.0)
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        timeout=timeout,
+        follow_redirects=True,
+        proxy=_rss_proxy(),
+        trust_env=False,
+    ) as client:
         sem = asyncio.Semaphore(6)
 
         async def _one(u: str) -> tuple[str, list[dict]]:
@@ -137,7 +163,7 @@ async def fetch_feeds(feed_urls: List[str], limit_each: int = 8) -> List[Dict[st
     per_url: dict[str, list[dict]] = {}
     for r in results:
         if isinstance(r, Exception):
-            logger.warning(f"[rss] fetch exception: {r}")
+            logger.opt(exception=r).warning("[rss] fetch exception")
             continue
         u, items = r
         per_url[u] = items or []

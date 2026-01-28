@@ -20,7 +20,31 @@ import httpx
 
 
 _UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
-_HEADERS = {"User-Agent": _UA, "Referer": "https://quote.eastmoney.com/"}
+_HEADERS = {"User-Agent": _UA, "Referer": "https://quote.eastmoney.com/", "Connection": "close"}
+
+
+async def _get_json(client: httpx.AsyncClient, url: str, params: dict[str, Any], *, retries: int = 4) -> dict[str, Any]:
+    """轻量重试：公开接口偶发断连时尽量不中断整条流水线。"""
+    for i in range(max(0, int(retries)) + 1):
+        try:
+            r = await client.get(url, params=params)
+            r.raise_for_status()
+            data = r.json()
+            if not isinstance(data, dict):
+                raise RuntimeError("non_json_dict")
+            # 常见响应包含 rc：0 表示正常；非 0 多为参数/风控/限流
+            if "rc" in data:
+                try:
+                    rc = int(data.get("rc") or 0)
+                except Exception:
+                    rc = 0
+                if rc != 0:
+                    raise RuntimeError(f"bad_rc={rc}")
+            return data
+        except Exception:
+            if i >= retries:
+                raise
+            await asyncio.sleep(0.6 * (2**i))
 
 
 def _market_suffix(market_code: Any) -> str:
@@ -73,6 +97,11 @@ class EastmoneyProvider:
     def __init__(self, *, proxy: str | None = None):
         self.proxy = proxy
 
+    def _client(self, *, timeout: float) -> httpx.AsyncClient:
+        # trust_env=False：避免环境变量代理影响东财稳定性（需要代理请显式配置 FIN_DAILY_EASTMONEY_PROXY）
+        limits = httpx.Limits(max_keepalive_connections=0, max_connections=20)
+        return httpx.AsyncClient(headers=_HEADERS, proxy=self.proxy, timeout=timeout, limits=limits, trust_env=False)
+
     async def last_open_trade_date(self) -> str:
         """用上证指数日K拿最近交易日（避免周末/节假日误判）。"""
         url = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
@@ -87,10 +116,8 @@ class EastmoneyProvider:
             "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
         }
 
-        async with httpx.AsyncClient(headers=_HEADERS, proxy=self.proxy, timeout=15.0) as client:
-            r = await client.get(url, params=params)
-            r.raise_for_status()
-            data = r.json() or {}
+        async with self._client(timeout=15.0) as client:
+            data = await _get_json(client, url, params)
             klines = (data.get("data") or {}).get("klines") or []
             if not klines:
                 # 兜底：今天日期（上海时区由容器 TZ 决定）
@@ -100,10 +127,18 @@ class EastmoneyProvider:
             return td or datetime.now().strftime("%Y%m%d")
 
     async def fetch_daily(self, trade_date: str) -> list[dict[str, Any]]:
-        """拉取 A股 全市场快照（字段对齐 tushare daily）。"""
+        """拉取 A股 快照（字段对齐 tushare daily）。
+
+        说明：
+        - Eastmoney `clist/get` 的单页条数存在上限（常见为 100）；
+        - 若只拉“涨幅排序”的第一页，无法得到真实的跌幅榜（会出现“跌幅Top仍为正数”的假象）；
+        - 本实现同时拉取“涨幅端 + 跌幅端”的前若干页作为候选池，供上层筛选 TopN。
+        """
         # fs: 深A/创业板/沪A/科创板（北京暂不加，避免规则差异）
         fs = "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23"
         url = "https://push2.eastmoney.com/api/qt/clist/get"
+        # 字段尽量精简：字段越多，偶发断连的概率越高（东财公开接口）。
+        # 只保留：选股所需（pct/amount）+ 小白解释所需（成交热度/市值）。
         fields = ",".join(
             [
                 "f12",  # code
@@ -111,54 +146,58 @@ class EastmoneyProvider:
                 "f14",  # name
                 "f2",  # close
                 "f3",  # pct
-                "f5",  # vol
                 "f6",  # amount（元）
-                "f15",  # high
-                "f16",  # low
-                "f17",  # open
-                "f18",  # preclose
-                # daily_basic-ish
                 "f8",  # turnover_rate
-                "f10",  # volume_ratio（常见映射；缺失则为0）
                 "f20",  # total_mv（元）
-                "f21",  # circ_mv（元）
-                "f9",  # pe（常见映射；缺失则为0）
-                "f23",  # pb
             ]
         )
 
-        pz = 5000
-        pn = 1
-        out: list[dict[str, Any]] = []
+        # clist 的 pz 可能会被服务端强制截断到 100；这里按 100 处理。
+        page_size = 100
+        max_pages_each_side = 3  # 3*100=300：TopN 足够 + 更稳
 
-        async with httpx.AsyncClient(headers=_HEADERS, proxy=self.proxy, timeout=20.0) as client:
-            while True:
-                params = {
-                    "pn": pn,
-                    "pz": pz,
-                    "po": 1,
-                    "np": 1,
-                    "ut": "bd1d9ddb04089700cf9c27f6f7426281",
-                    "fltt": 2,
-                    "invt": 2,
-                    "fid": "f3",
-                    "fs": fs,
-                    "fields": fields,
-                }
-                r = await client.get(url, params=params)
-                r.raise_for_status()
-                data = r.json() or {}
-                diff = (data.get("data") or {}).get("diff") or []
-                if not diff:
-                    break
-                for it in diff:
-                    code = str(it.get("f12") or "").strip()
-                    mc = it.get("f13")
-                    ts_code = _to_ts_code(code, mc)
-                    if not ts_code:
-                        continue
-                    out.append(
-                        {
+        out_map: dict[str, dict[str, Any]] = {}
+        had_error = False
+        last_exc: Exception | None = None
+        ok_sides: set[int] = set()
+
+        async with self._client(timeout=20.0) as client:
+            # po=1：涨幅端（高→低）；po=0：跌幅端（低→高）
+            for po in (1, 0):
+                pn = 1
+                got_any = False
+                while pn <= max_pages_each_side:
+                    params = {
+                        "pn": pn,
+                        "pz": page_size,
+                        "po": po,
+                        "np": 1,
+                        "ut": "bd1d9ddb04089700cf9c27f6f7426281",
+                        "fltt": 2,
+                        "invt": 2,
+                        "fid": "f3",
+                        "fs": fs,
+                        "fields": fields,
+                    }
+                    try:
+                        data = await _get_json(client, url, params)
+                    except Exception as e:
+                        # 单页失败就停止这一侧，保留已拿到的候选池；如果两侧都拿不到任何数据，则交给上层重试。
+                        had_error = True
+                        last_exc = e
+                        break
+                    diff = (data.get("data") or {}).get("diff") or []
+                    if not diff:
+                        break
+                    got_any = True
+
+                    for it in diff:
+                        code = str(it.get("f12") or "").strip()
+                        mc = it.get("f13")
+                        ts_code = _to_ts_code(code, mc)
+                        if not ts_code:
+                            continue
+                        out_map[ts_code] = {
                             "ts_code": ts_code,
                             "trade_date": trade_date,
                             "open": _safe_float(it.get("f17")),
@@ -166,22 +205,86 @@ class EastmoneyProvider:
                             "low": _safe_float(it.get("f16")),
                             "close": _safe_float(it.get("f2")),
                             "vol": _safe_float(it.get("f5")),
-                            "amount": _safe_float(it.get("f6")),  # 已是元
+                            "amount": _safe_float(it.get("f6")),  # 元
                             "pct_chg": _safe_float(it.get("f3")),
                             "name": str(it.get("f14") or "").strip(),
-                            # 附带 daily_basic 字段（方便管道直接入库）
+                            # daily_basic-ish
                             "turnover_rate": _safe_float(it.get("f8")),
                             "volume_ratio": _safe_float(it.get("f10")),
-                            "total_mv": _safe_float(it.get("f20")) / 10000.0,  # 转为“万元”对齐 tushare
+                            "total_mv": _safe_float(it.get("f20")) / 10000.0,  # 万元
                             "circ_mv": _safe_float(it.get("f21")) / 10000.0,
                             "pe": _safe_float(it.get("f9")),
                             "pb": _safe_float(it.get("f23")),
                         }
-                    )
-                if len(diff) < pz:
-                    break
-                pn += 1
-        return out
+
+                    # 服务端可能强制 page_size=100；用当前 diff 长度判断是否到尾。
+                    if len(diff) < page_size:
+                        break
+                    pn += 1
+                    await asyncio.sleep(0.15)
+                if got_any:
+                    ok_sides.add(int(po))
+
+        # 兜底：如果只拿到一侧（例如 po=0 断连），再单独补一次缺失侧的第一页，尽量保证“涨+跌”都齐。
+        if 0 not in ok_sides or 1 not in ok_sides:
+            missing = [po for po in (1, 0) if po not in ok_sides]
+            async with self._client(timeout=20.0) as client:
+                for po in missing:
+                    params = {
+                        "pn": 1,
+                        "pz": page_size,
+                        "po": po,
+                        "np": 1,
+                        "ut": "bd1d9ddb04089700cf9c27f6f7426281",
+                        "fltt": 2,
+                        "invt": 2,
+                        "fid": "f3",
+                        "fs": fs,
+                        "fields": fields,
+                    }
+                    try:
+                        data = await _get_json(client, url, params)
+                        diff = (data.get("data") or {}).get("diff") or []
+                        if not diff:
+                            continue
+                        ok_sides.add(int(po))
+                        for it in diff:
+                            code = str(it.get("f12") or "").strip()
+                            mc = it.get("f13")
+                            ts_code = _to_ts_code(code, mc)
+                            if not ts_code:
+                                continue
+                            out_map[ts_code] = {
+                                "ts_code": ts_code,
+                                "trade_date": trade_date,
+                                "open": 0.0,
+                                "high": 0.0,
+                                "low": 0.0,
+                                "close": _safe_float(it.get("f2")),
+                                "vol": 0.0,
+                                "amount": _safe_float(it.get("f6")),
+                                "pct_chg": _safe_float(it.get("f3")),
+                                "name": str(it.get("f14") or "").strip(),
+                                "turnover_rate": _safe_float(it.get("f8")),
+                                "volume_ratio": 0.0,
+                                "total_mv": _safe_float(it.get("f20")) / 10000.0,
+                                "circ_mv": 0.0,
+                                "pe": 0.0,
+                                "pb": 0.0,
+                            }
+                    except Exception as e:
+                        had_error = True
+                        last_exc = e
+                        continue
+
+        # 如果只拿到一侧，很容易导致“跌幅榜不是真跌幅”，宁可失败让上层重试。
+        if 0 not in ok_sides or 1 not in ok_sides:
+            if had_error and last_exc is not None:
+                raise last_exc
+            raise RuntimeError("incomplete_market_snapshot")
+        if not out_map and had_error and last_exc is not None:
+            raise last_exc
+        return list(out_map.values())
 
     async def fetch_stock_basic(self) -> list[dict[str, Any]]:
         """与 tushare 对齐的占位接口：eastmoney 方案不依赖该表。"""
@@ -193,10 +296,8 @@ class EastmoneyProvider:
         code, suffix = (ts_code or "").split(".", 1) if "." in (ts_code or "") else (ts_code or "", "SZ")
         em_code = f"{suffix.upper()}{code}"
         url = "https://emweb.securities.eastmoney.com/PC_HSF10/CompanySurvey/CompanySurveyAjax"
-        async with httpx.AsyncClient(headers=_HEADERS, proxy=self.proxy, timeout=15.0) as client:
-            r = await client.get(url, params={"code": em_code})
-            r.raise_for_status()
-            data = r.json() or {}
+        async with self._client(timeout=15.0) as client:
+            data = await _get_json(client, url, {"code": em_code})
             jbzl = data.get("jbzl") or {}
             return {
                 "ts_code": ts_code,
@@ -212,7 +313,7 @@ class EastmoneyProvider:
         # 接口按 stock_list=股票代码（不带交易所后缀）
         code = (ts_code or "").split(".", 1)[0]
         url = "https://np-anotice-stock.eastmoney.com/api/security/ann"
-        headers = {"User-Agent": _UA, "Referer": "https://data.eastmoney.com/"}
+        headers = {"User-Agent": _UA, "Referer": "https://data.eastmoney.com/", "Connection": "close"}
 
         page_index = 1
         page_size = 50
@@ -220,7 +321,8 @@ class EastmoneyProvider:
         start = start_date or ""
         end = end_date or ""
 
-        async with httpx.AsyncClient(headers=headers, proxy=self.proxy, timeout=20.0) as client:
+        limits = httpx.Limits(max_keepalive_connections=0, max_connections=20)
+        async with httpx.AsyncClient(headers=headers, proxy=self.proxy, timeout=20.0, limits=limits, trust_env=False) as client:
             while page_index <= 4:  # TopN 用不到太深，控制成本
                 params = {
                     "sr": "-1",
@@ -232,9 +334,7 @@ class EastmoneyProvider:
                     "f_node": "0",
                     "s_node": "0",
                 }
-                r = await client.get(url, params=params)
-                r.raise_for_status()
-                data = r.json() or {}
+                data = await _get_json(client, url, params)
                 items = (data.get("data") or {}).get("list") or []
                 if not items:
                     break

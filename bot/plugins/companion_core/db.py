@@ -26,6 +26,9 @@ from .web.utils import sha1 as _sha1
 
 DB_PATH = Path(__file__).parent / "data.db"
 
+# 方案 A：24 小时滚动窗口。超过 24h 未与小A对话 → 不再收到任何“主动推送”（不影响用户来触发的回复）
+ACTIVE_WITHIN_SECONDS = 24 * 60 * 60
+
 
 @dataclass(frozen=True)
 class ProactiveCandidate:
@@ -203,6 +206,7 @@ def _get_last_user_text(conn: sqlite3.Connection, user_id: str) -> Optional[str]
 async def get_proactive_candidates(now: datetime, idle_before: datetime, limit: int = 20) -> list[ProactiveCandidate]:
     now_ts = _ts(now)
     idle_ts = _ts(idle_before)
+    active_after_ts = max(0, int(now_ts) - int(ACTIVE_WITHIN_SECONDS))
 
     def _sync() -> list[ProactiveCandidate]:
         out: list[ProactiveCandidate] = []
@@ -215,12 +219,13 @@ async def get_proactive_candidates(now: datetime, idle_before: datetime, limit: 
                 WHERE proactive_enabled=1
                   AND last_active_ts > 0
                   AND last_active_ts <= ?
+                  AND last_active_ts >= ?
                   AND cooldown_until_ts <= ?
                   AND lock_until_ts <= ?
                 ORDER BY last_active_ts ASC
                 LIMIT ?
                 """,
-                (idle_ts, now_ts, now_ts, limit),
+                (idle_ts, active_after_ts, now_ts, now_ts, limit),
             )
             rows = cur.fetchall()
             for uid_text, last_active_ts in rows:
@@ -435,6 +440,8 @@ async def get_rss_user_targets():
 async def get_idle_user_states(limit: int = 200) -> list[tuple[str, int]]:
     """获取处于“可主动互动”的用户与其最后活跃时间戳。"""
     limit = int(limit) if limit else 200
+    now_ts = _ts(datetime.now())
+    active_after_ts = max(0, int(now_ts) - int(ACTIVE_WITHIN_SECONDS))
 
     def _sync() -> list[tuple[str, int]]:
         with sqlite3.connect(DB_PATH) as conn:
@@ -445,10 +452,11 @@ async def get_idle_user_states(limit: int = 200) -> list[tuple[str, int]]:
                 FROM user_state
                 WHERE proactive_enabled=1
                   AND last_active_ts > 0
+                  AND last_active_ts >= ?
                 ORDER BY last_active_ts ASC
                 LIMIT ?
                 """,
-                (limit,),
+                (active_after_ts, limit),
             )
             return [(str(uid), int(ts or 0)) for uid, ts in cur.fetchall()]
 
@@ -520,6 +528,8 @@ async def get_weather_user_targets() -> list[tuple[str, str]]:
     - 默认只给 `user_state.proactive_enabled=1` 的用户推送；
     - 用户画像里存在“城市/所在地/所在城市...”任一字段才视为可推送。
     """
+    now_ts = _ts(datetime.now())
+    active_after_ts = max(0, int(now_ts) - int(ACTIVE_WITHIN_SECONDS))
 
     def _sync() -> list[tuple[str, str]]:
         with sqlite3.connect(DB_PATH) as conn:
@@ -530,9 +540,11 @@ async def get_weather_user_targets() -> list[tuple[str, str]]:
                 FROM user_state us
                 JOIN user_profile up ON up.user_id = us.user_id
                 WHERE us.proactive_enabled=1
+                  AND us.last_active_ts > 0
+                  AND us.last_active_ts >= ?
                   AND up.key IN ({",".join(["?"] * len(_CITY_KEYS))})
                 """,
-                _CITY_KEYS,
+                (active_after_ts, *_CITY_KEYS),
             )
             rows = cur.fetchall()
 
@@ -569,6 +581,51 @@ async def weather_pushed_today(user_id: str, day: date) -> bool:
             return cur.fetchone() is not None
 
     return await asyncio.to_thread(_sync)
+
+
+async def filter_active_user_ids(user_ids: list[int], now: Optional[datetime] = None) -> list[int]:
+    """按“24小时内活跃”过滤 user_id（保持输入顺序）。"""
+    ids: list[int] = []
+    for x in user_ids or []:
+        try:
+            v = int(x)
+        except Exception:
+            continue
+        if v > 0:
+            ids.append(v)
+
+    if not ids:
+        return []
+
+    now_ts = _ts(now or datetime.now())
+    active_after_ts = max(0, int(now_ts) - int(ACTIVE_WITHIN_SECONDS))
+    uid_texts = [str(i) for i in ids]
+
+    def _sync() -> set[int]:
+        placeholders = ",".join(["?"] * len(uid_texts))
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.cursor()
+            cur.execute(
+                f"""
+                SELECT user_id
+                FROM user_state
+                WHERE last_active_ts > 0
+                  AND last_active_ts >= ?
+                  AND user_id IN ({placeholders})
+                """,
+                (active_after_ts, *uid_texts),
+            )
+            rows = cur.fetchall()
+        out: set[int] = set()
+        for (uid,) in rows or []:
+            try:
+                out.add(int(uid))
+            except Exception:
+                continue
+        return out
+
+    active = await asyncio.to_thread(_sync)
+    return [i for i in ids if i in active]
 
 
 async def weather_mark_pushed(user_id: str, day: date) -> None:

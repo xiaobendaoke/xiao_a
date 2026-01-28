@@ -138,6 +138,20 @@ def init_db() -> None:
             )
             """
         )
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS subscriptions (
+              market TEXT,
+              user_id INTEGER,
+              enabled INTEGER DEFAULT 1,
+              created_ts INTEGER DEFAULT 0,
+              updated_ts INTEGER DEFAULT 0,
+              PRIMARY KEY (market, user_id)
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_subscriptions_market_enabled ON subscriptions(market, enabled)")
         conn.commit()
 
         # --- 轻量迁移：为已存在旧表补列 ---
@@ -291,6 +305,76 @@ async def mark_job_failed(market: str, trade_date: str, error: str) -> None:
             conn.commit()
 
     await asyncio.to_thread(_sync)
+
+
+async def set_subscription(market: str, user_id: int, *, enabled: bool) -> None:
+    now = _now_ts()
+    m = (market or "").strip() or "CN_A"
+    uid = int(user_id)
+    en = 1 if enabled else 0
+
+    def _sync() -> None:
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO subscriptions(market,user_id,enabled,created_ts,updated_ts)
+                VALUES (?,?,?,?,?)
+                ON CONFLICT(market,user_id) DO UPDATE SET
+                  enabled=excluded.enabled,
+                  updated_ts=excluded.updated_ts
+                """,
+                (m, uid, en, now, now),
+            )
+            conn.commit()
+
+    await asyncio.to_thread(_sync)
+
+
+async def is_subscription_enabled(market: str, user_id: int) -> bool:
+    m = (market or "").strip() or "CN_A"
+    uid = int(user_id)
+
+    def _sync() -> bool:
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT enabled FROM subscriptions WHERE market=? AND user_id=? LIMIT 1",
+                (m, uid),
+            )
+            row = cur.fetchone()
+            if not row:
+                return False
+            return int(row[0] or 0) == 1
+
+    return await asyncio.to_thread(_sync)
+
+
+async def list_enabled_subscribers(market: str) -> list[int]:
+    m = (market or "").strip() or "CN_A"
+
+    def _sync() -> list[int]:
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT user_id
+                FROM subscriptions
+                WHERE market=? AND enabled=1
+                ORDER BY created_ts ASC, user_id ASC
+                """,
+                (m,),
+            )
+            rows = cur.fetchall()
+        out: list[int] = []
+        for (uid,) in rows or []:
+            try:
+                out.append(int(uid))
+            except Exception:
+                continue
+        return list(dict.fromkeys([u for u in out if u > 0]))
+
+    return await asyncio.to_thread(_sync)
 
 
 async def upsert_symbols_basic(

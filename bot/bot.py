@@ -10,8 +10,24 @@
 - 导入并启动时会触发插件的模块导入（插件可能在 import 时注册 handler / scheduler）。
 """
 
+import os
 import nonebot
 from nonebot.adapters.onebot.v11 import Adapter as ONEBOT_V11_Adapter
+
+# 某些环境会在 env_file 里写 `HTTP_PROXY=`（空字符串），这会导致 httpx 认为启用了代理，
+# 但代理地址为空，从而出现所有外网请求超时且异常信息为空（如 `ConnectTimeout('')`）。
+for _k in (
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+):
+    if _k in os.environ and not (os.environ.get(_k) or "").strip():
+        os.environ.pop(_k, None)
 
 # 1. 初始化 NoneBot
 nonebot.init()

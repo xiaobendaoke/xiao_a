@@ -13,6 +13,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from html import unescape
+import asyncio
+import os
 import re
 import time
 from typing import Optional
@@ -30,6 +32,21 @@ class _CacheEntry:
 
 
 _cache: dict[str, _CacheEntry] = {}
+
+def _rss_proxy() -> str | None:
+    for k in (
+        "RSS_PROXY",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "ALL_PROXY",
+        "https_proxy",
+        "http_proxy",
+        "all_proxy",
+    ):
+        v = (os.getenv(k) or "").strip()
+        if v:
+            return v
+    return None
 
 
 def _cache_get(key: str) -> Optional[list[dict]]:
@@ -69,10 +86,18 @@ async def fetch_github_trending(limit: int = 8, since: str = "daily", language: 
 
     timeout = httpx.Timeout(8.0, connect=4.0)
     try:
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-            resp = await client.get(url, params=params, headers={"User-Agent": _UA, "Accept": "text/html,*/*;q=0.8"})
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, proxy=_rss_proxy(), trust_env=False) as client:
+            for i in range(2):
+                try:
+                    resp = await client.get(url, params=params, headers={"User-Agent": _UA, "Accept": "text/html,*/*;q=0.8"})
+                    break
+                except Exception:
+                    if i < 1:
+                        await asyncio.sleep(0.3)
+                        continue
+                    raise
     except Exception as e:
-        logger.warning(f"[rss] github trending fetch failed: {e}")
+        logger.opt(exception=e).warning("[rss] github trending fetch failed")
         _cache_set(cache_key, [], ttl_seconds=120.0)
         return []
 
@@ -143,10 +168,18 @@ async def fetch_v2ex_hot(limit: int = 10) -> list[dict]:
 
     timeout = httpx.Timeout(8.0, connect=4.0)
     try:
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-            resp = await client.get(url, headers={"User-Agent": _UA, "Accept": "text/html,*/*;q=0.8"})
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, proxy=_rss_proxy(), trust_env=False) as client:
+            for i in range(2):
+                try:
+                    resp = await client.get(url, headers={"User-Agent": _UA, "Accept": "text/html,*/*;q=0.8"})
+                    break
+                except Exception:
+                    if i < 1:
+                        await asyncio.sleep(0.3)
+                        continue
+                    raise
     except Exception as e:
-        logger.warning(f"[rss] v2ex hot fetch failed: {e}")
+        logger.opt(exception=e).warning("[rss] v2ex hot fetch failed")
         _cache_set(cache_key, [], ttl_seconds=120.0)
         return []
 

@@ -5,17 +5,15 @@
 - 定时任务与管道直接引用常量（改配置后重启生效）。
 
 关键配置：
-- `TUSHARE_TOKEN`：Tushare Pro Token（必需）
+- `TUSHARE_TOKEN`：Tushare Pro Token（可选；仅在 `FIN_DAILY_DATA_PROVIDER=tushare` 时使用）
 - `FIN_DAILY_ENABLED`：1/0 开关
 - `FIN_DAILY_RUN_HOUR`/`FIN_DAILY_RUN_MINUTE`：每日执行时间（按容器 TZ）
 - `FIN_DAILY_TOP_N`：涨跌榜各取 N
 - `FIN_DAILY_AMOUNT_MIN`：过滤成交额阈值（元；内部已把 tushare amount 换算为元）
 - `FIN_DAILY_NEW_LIST_DAYS`：过滤新股上市天数 < X
 - `FIN_DAILY_ANN_LOOKBACK_DAYS`：公告回看天数（TopN 小时按股票拉更省调用）
-- `FIN_DAILY_TARGETS`：私聊目标，如 `private:123456`；或写 `all_friends` 开启广播
-- `FIN_DAILY_BROADCAST_ALL_FRIENDS`：1/0 显式开启“发给所有好友”（仅私聊）
+- 推送目标不在 env 配：改为“私聊订阅制”（见 commands.py：开启/关闭/状态）
 - `FIN_DAILY_SEND_INTERVAL_SECONDS`：发送节流间隔（秒）
-- `FIN_DAILY_BROADCAST_LIMIT`：广播上限（0=不限制）
 """
 
 from __future__ import annotations
@@ -93,8 +91,10 @@ FIN_DAILY_CHAT_PER_STOCK = _env_bool("FIN_DAILY_CHAT_PER_STOCK", True)
 FIN_DAILY_OVERVIEW_ENABLED = _env_bool("FIN_DAILY_OVERVIEW_ENABLED", True)
 FIN_DAILY_ITEM_MAX_CHARS = max(120, _env_int("FIN_DAILY_ITEM_MAX_CHARS", 280))
 
-FIN_DAILY_DATA_PROVIDER = (os.getenv("FIN_DAILY_DATA_PROVIDER") or "eastmoney").strip().lower()
-FIN_DAILY_EASTMONEY_PROXY = _env_token("FIN_DAILY_EASTMONEY_PROXY", "") or _env_token("HTTP_PROXY", "")
+FIN_DAILY_DATA_PROVIDER = (os.getenv("FIN_DAILY_DATA_PROVIDER") or "sina").strip().lower()
+# 注意：不要默认继承 HTTP_PROXY/HTTPS_PROXY（有些代理会导致东财偶发断连）。
+# 如确实需要走代理，请显式设置 FIN_DAILY_EASTMONEY_PROXY。
+FIN_DAILY_EASTMONEY_PROXY = _env_token("FIN_DAILY_EASTMONEY_PROXY", "")
 
 FIN_DAILY_TARGETS_RAW = (os.getenv("FIN_DAILY_TARGETS") or "").strip()
 FIN_DAILY_TARGETS = parse_targets(FIN_DAILY_TARGETS_RAW)

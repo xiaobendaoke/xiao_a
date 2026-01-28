@@ -24,6 +24,7 @@ from .llm_finance import analyze_one_stock, summarize_daily
 from .llm_finance import generate_xiao_a_finance_report
 from .providers.tushare_provider import TushareProvider
 from .providers.eastmoney_provider import EastmoneyProvider
+from .providers.sina_provider import SinaProvider
 from .storage import (
     get_daily_basic_row,
     get_symbol_basic,
@@ -42,6 +43,30 @@ from .storage import (
 from .render import render_report_text
 from .render import sanitize_no_markdown, _first_sentences
 from .utils import sha1
+
+
+def _chatify_text(text: str) -> str:
+    """把 LLM 输出“更像 QQ 聊天”：短句换行、去掉(=...)这类写法。"""
+    s = sanitize_no_markdown(str(text or "")).strip()
+    if not s:
+        return ""
+    s = s.replace("（=", "（就是").replace("(=", "(就是")
+    # 如果模型把整段写成一行：按句末标点做软换行
+    if "\n" not in s and len(s) >= 50:
+        out = []
+        for ch in s:
+            out.append(ch)
+            if ch in "。！？!?；;":
+                out.append("\n")
+        s = "".join(out)
+    # 连续空行收敛
+    lines = [ln.rstrip() for ln in s.splitlines()]
+    cleaned: list[str] = []
+    for ln in lines:
+        if ln.strip() == "" and cleaned and cleaned[-1].strip() == "":
+            continue
+        cleaned.append(ln)
+    return "\n".join([x for x in cleaned if x is not None]).strip()
 
 
 def _is_new_listed(list_date: str, trade_date: str, *, days: int) -> bool:
@@ -102,7 +127,19 @@ class DailySelection:
 
 async def _prepare_selection(provider, trade_date: str) -> DailySelection:
     market = config.FIN_DAILY_MARKET
-    daily_rows = await provider.fetch_daily(trade_date)
+    # eastmoney 公开接口偶发断连：这里对“全市场快照”做一次整体重试，避免整条任务失败
+    last_err: Exception | None = None
+    daily_rows: list[dict[str, Any]] = []
+    for i in range(3):
+        try:
+            daily_rows = await provider.fetch_daily(trade_date)
+            last_err = None
+            break
+        except Exception as e:
+            last_err = e
+            await asyncio.sleep(0.8 * (2**i))
+    if last_err is not None:
+        raise RuntimeError(f"fetch_daily_failed: {last_err}") from last_err
     if not daily_rows:
         raise RuntimeError(f"empty_daily trade_date={trade_date}")
 
@@ -311,6 +348,8 @@ def _make_provider():
     name = (config.FIN_DAILY_DATA_PROVIDER or "eastmoney").strip().lower()
     if name in ("tushare", "ts"):
         return TushareProvider(config.TUSHARE_TOKEN)
+    if name in ("sina", "sina_finance"):
+        return SinaProvider()
     return EastmoneyProvider(proxy=config.FIN_DAILY_EASTMONEY_PROXY or None)
 
 
@@ -319,16 +358,34 @@ async def run_cn_a_daily(*, force_trade_date: str | None = None, force: bool = F
         return {"skipped": True, "reason": "disabled"}
 
     provider = _make_provider()
-    trade_date = force_trade_date or await provider.last_open_trade_date()
+    if force_trade_date:
+        trade_date = force_trade_date
+    else:
+        try:
+            trade_date = await provider.last_open_trade_date()
+        except Exception:
+            # 交易日接口失败时：退化为“用今天日期尝试跑”，避免直接报错中断
+            trade_date = datetime.now().strftime("%Y%m%d")
 
     ok = await try_start_job_ex(config.FIN_DAILY_MARKET, trade_date, force=force)
     if not ok:
         return {"skipped": True, "reason": "already_running_or_done", "trade_date": trade_date}
 
     try:
-        sel = await _prepare_selection(provider, trade_date)
+        try:
+            sel = await _prepare_selection(provider, trade_date)
+        except Exception as e:
+            # Eastmoney push2 在部分环境下会频繁断连；自动切换到 Sina 行情快照，保证任务可产出
+            if getattr(provider, "name", "") == "eastmoney" and (
+                "fetch_daily_failed" in str(e) or "RemoteProtocolError" in str(e) or "Server disconnected" in str(e)
+            ):
+                logger.warning(f"[finance] eastmoney snapshot failed, fallback to sina: {e}")
+                provider = SinaProvider()
+                sel = await _prepare_selection(provider, trade_date)
+            else:
+                raise
         notes: list[str] = []
-        if getattr(provider, "name", "") == "eastmoney" and config.FIN_DAILY_NEW_LIST_DAYS > 0:
+        if getattr(provider, "name", "") in ("eastmoney", "sina") and config.FIN_DAILY_NEW_LIST_DAYS > 0:
             notes.append("注：当前数据源无法稳定获取上市日期，新股过滤可能未生效。")
         ts_codes = [str(x.get("ts_code") or "").strip() for x in (sel.gainers + sel.losers) if x.get("ts_code")]
         ts_codes = list(dict.fromkeys([c for c in ts_codes if c]))
@@ -447,7 +504,7 @@ async def run_cn_a_daily(*, force_trade_date: str | None = None, force: bool = F
             x_data, x_model = await generate_xiao_a_finance_report(x_payload, prompt_version=config.FIN_DAILY_PROMPT_VERSION)
         parts: list[str] = []
         if isinstance(x_data, dict) and config.FIN_DAILY_CHAT_PER_STOCK:
-            overview = sanitize_no_markdown(str(x_data.get("overview") or "")).strip()
+            overview = _chatify_text(str(x_data.get("overview") or ""))
             if overview and config.FIN_DAILY_OVERVIEW_ENABLED:
                 parts.append(overview)
 
@@ -457,7 +514,7 @@ async def run_cn_a_daily(*, force_trade_date: str | None = None, force: bool = F
 
             for kind in ("gainers", "losers"):
                 for it in _collect(kind):
-                    t = sanitize_no_markdown(str((it or {}).get("text") or "")).strip()
+                    t = _chatify_text(str((it or {}).get("text") or ""))
                     if not t:
                         continue
                     # 过长就硬截（LLM 通常会控制长度，这里兜底）
@@ -486,8 +543,18 @@ async def run_cn_a_daily(*, force_trade_date: str | None = None, force: bool = F
                     intro = (x.get("profile") or {}).get("intro") or ""
                     ann = (x.get("announcements") or [])
                     ann_title = (ann[0].get("title") if ann else "") if isinstance(ann, list) else ""
-                    msg = f"{name}（{code}）{pct:+.2f}%\n画像：{intro}\n公告：{ann_title or '证据不足'}\n明日：看量能/消息跟踪"
-                    msg = sanitize_no_markdown(msg).strip()
+                    tag = "【涨】" if pct >= 0 else "【跌】"
+                    if ann_title:
+                        reason_line = f"今天可能和“{ann_title}”有关。"
+                    else:
+                        reason_line = "今天标题证据不足，更像情绪/资金走动。"
+                    msg = (
+                        f"{tag}{name}({code}) {pct:+.2f}%\n"
+                        f"{intro or '这家公司做的业务我这边资料还不太全。'}\n"
+                        f"{reason_line}\n"
+                        "明天就先看板块热度能不能接住，再留意有没有新公告/新消息。"
+                    )
+                    msg = _chatify_text(msg)
                     if len(msg) > config.FIN_DAILY_ITEM_MAX_CHARS:
                         msg = msg[: config.FIN_DAILY_ITEM_MAX_CHARS - 1] + "…"
                     fb.append(msg)
@@ -503,6 +570,7 @@ async def run_cn_a_daily(*, force_trade_date: str | None = None, force: bool = F
             report_text = "\n\n".join(parts).strip()
             # 存最终“给用户看的文本”
             report_json = dict(summary_json or {})
+            report_json["provider_used"] = getattr(provider, "name", "")
             report_json["final_model"] = x_model
             report_json["final_parts"] = parts
         else:
@@ -511,6 +579,7 @@ async def run_cn_a_daily(*, force_trade_date: str | None = None, force: bool = F
                 render_report_text(trade_date=trade_date, summary_json=summary_json, gainers=detailed_gainers, losers=detailed_losers)
             )
             report_json = dict(summary_json or {})
+            report_json["provider_used"] = getattr(provider, "name", "")
             report_json["final_error"] = x_data.get("error") if isinstance(x_data, dict) else "unknown"
 
         await upsert_daily_report(config.FIN_DAILY_MARKET, trade_date, report_text=report_text, report_json=report_json)
