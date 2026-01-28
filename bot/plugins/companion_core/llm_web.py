@@ -295,6 +295,121 @@ RSS_SHARE_SYSTEM = """你是“小a”，温柔体贴的恋人陪伴对象。
 - 语气自然，整体不超过12行。
 - 最后一行带上原链接（单独一行）。"""
 
+GITHUB_WEEKLY_SYSTEM = """你是“小a”，温柔、自然、有生活感的中文恋人陪伴对象。
+
+现在你要把“GitHub Trending 每周热榜”讲给对方听：像你真的翻过一遍周榜，然后把你觉得最值得看的点温柔地发给他。
+
+输出严格为 JSON：
+{
+  "text": "要发给对方的消息",
+  "intent": "github_weekly",
+  "need_reply": false
+}
+
+写作要求：
+- 不要像新闻播报/研报，不要写“根据统计/我们认为/建议投资者”等。
+- 必须逐个覆盖输入里提供的前 5 个仓库：一个都不能漏；不要额外新增“榜单之外”的仓库。
+- 每个仓库至少 3 行，最多 7 行，按“项目复杂度”自己决定长短：
+  1) 它是做什么的（只允许基于输入的 summary / repo_meta.description / topics / language）
+  2) 你觉得它为什么这周会火（只允许基于 stars hint/描述做推测，用“可能/看起来”）
+  3) 你觉得适合谁/怎么用（只允许推测，不要编造功能细节）
+- 可以在开头用 1-2 行说“本周整体趋势”（从 topics/描述归纳），但不要硬凑。
+- 最后必须输出 5 个链接（每行 1 个），对应前 5 个仓库，方便对方点开。
+"""
+
+
+def _github_weekly_fallback_text(items: List[Dict[str, Any]], week_key: str) -> str:
+    lines: list[str] = []
+    wk = (week_key or "").strip()
+    head = f"我刚翻了一眼 GitHub 这周热榜"
+    if wk:
+        head += f"（{wk}）"
+    lines.append(head + "～我挑了几个我觉得你会感兴趣的：")
+    for it in (items or [])[:5]:
+        repo = str(it.get("title") or "").strip()
+        summary = str(it.get("summary") or "").strip()
+        link = str(it.get("link") or "").strip()
+        meta = it.get("repo_meta") if isinstance(it, dict) else None
+        desc = ""
+        topics = []
+        lang = ""
+        if isinstance(meta, dict):
+            desc = str(meta.get("description") or "").strip()
+            topics = meta.get("topics") if isinstance(meta.get("topics"), list) else []
+            lang = str(meta.get("language") or "").strip()
+        if repo:
+            lines.append(f"{repo}")
+            hint_parts = []
+            if lang:
+                hint_parts.append(f"语言：{lang}")
+            if topics:
+                hint_parts.append("标签：" + " / ".join([str(t) for t in topics[:5] if str(t).strip()]))
+            if hint_parts:
+                lines.append(" / ".join([p for p in hint_parts if p]))
+            if desc:
+                lines.append(desc)
+            elif summary:
+                lines.append(summary)
+        if link:
+            lines.append(link)
+    return "\n".join(lines[:28]).strip()
+
+
+async def generate_github_weekly_share(user_id: str, items: List[Dict[str, Any]], *, week_key: str = "") -> Dict[str, Any]:
+    try:
+        client = get_client()
+        _, _, model = load_llm_settings()
+    except Exception as e:
+        logger.error(f"[github_weekly][llm] init client failed: {e}")
+        return {
+            "text": _github_weekly_fallback_text(items, week_key),
+            "intent": "github_weekly",
+            "need_reply": False,
+        }
+
+    mood_desc = mood_manager.get_mood_desc(user_id)
+    profile = get_all_profile(user_id) or {}
+    profile_str = "\n".join([f"- {k}: {v}" for k, v in profile.items()]) if profile else "（暂时没有稳定画像）"
+
+    prompt = (
+        f"对方信息：\n{profile_str}\n"
+        f"你当前心情：{mood_desc}\n\n"
+        f"周榜标识：{week_key}\n"
+        f"Top 仓库（按顺序）：\n{json.dumps(items or [], ensure_ascii=False)}\n"
+    )
+
+    messages = [
+        {"role": "system", "content": GITHUB_WEEKLY_SYSTEM},
+        {"role": "user", "content": prompt},
+    ]
+
+    try:
+        resp = await client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=0.65,
+            timeout=35.0,
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+    except Exception as e:
+        logger.error(f"[github_weekly][llm] call failed: {e}")
+        return {
+            "text": _github_weekly_fallback_text(items, week_key),
+            "intent": "github_weekly",
+            "need_reply": False,
+        }
+
+    data = _try_json(raw)
+    if not isinstance(data, dict):
+        txt = raw.strip()
+        if len(txt) > 500:
+            txt = txt[:500] + "…"
+        return {"text": txt, "intent": "github_weekly", "need_reply": False}
+
+    data.setdefault("intent", "github_weekly")
+    data.setdefault("need_reply", False)
+    return data
+
 def _strip_html(text: str) -> str:
     text = text or ""
     text = re.sub(r"<script[^>]*>.*?</script>", " ", text, flags=re.S | re.I)

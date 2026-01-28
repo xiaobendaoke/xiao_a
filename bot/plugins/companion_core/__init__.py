@@ -15,6 +15,7 @@ from . import handlers # 导入即注册
 from . import http_api  # noqa: F401  # 注册 HTTP API（STM32 等额外入口）
 from . import proactive  # noqa: F401  # 注册主动互动定时任务
 from . import rss_push   # noqa: F401  # 注册RSS主动分享定时任务
+from . import github_weekly_push  # noqa: F401  # 注册 GitHub 周榜定时推送
 from . import weather_push  # noqa: F401  # 注册天气早晨提醒定时任务
 
 __plugin_meta__ = PluginMetadata(

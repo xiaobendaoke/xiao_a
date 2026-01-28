@@ -531,7 +531,17 @@ async def run_cn_a_daily(*, force_trade_date: str | None = None, force: bool = F
                 existing = set(parts)
                 fb = []
                 if config.FIN_DAILY_OVERVIEW_ENABLED:
-                    fb.append(sanitize_no_markdown(render_report_text(trade_date=trade_date, summary_json=summary_json, gainers=detailed_gainers, losers=detailed_losers).splitlines()[0]))
+                    try:
+                        head = render_report_text(
+                            trade_date=trade_date,
+                            summary_json=summary_json,
+                            gainers=detailed_gainers,
+                            losers=detailed_losers,
+                        ).splitlines()[0]
+                        fb.append(sanitize_no_markdown(head))
+                    except Exception:
+                        # 双保险：兜底不要让任务因为“渲染头行”失败而整体失败
+                        fb.append(f"A股收盘复盘 {trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:8]}")
                 # 每只股票补一条
                 for x in detailed_gainers + detailed_losers:
                     name = str((x.get("profile") or {}).get("name") or x.get("name") or "").strip()
@@ -575,9 +585,18 @@ async def run_cn_a_daily(*, force_trade_date: str | None = None, force: bool = F
             report_json["final_parts"] = parts
         else:
             # fallback：用渲染器拼一份“非markdown”的文本
-            report_text = sanitize_no_markdown(
-                render_report_text(trade_date=trade_date, summary_json=summary_json, gainers=detailed_gainers, losers=detailed_losers)
-            )
+            try:
+                report_text = sanitize_no_markdown(
+                    render_report_text(
+                        trade_date=trade_date,
+                        summary_json=summary_json,
+                        gainers=detailed_gainers,
+                        losers=detailed_losers,
+                    )
+                )
+            except Exception as e:
+                # 双保险：渲染器异常时，仍保证产出可推送的文本
+                report_text = f"A股收盘复盘 {trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:8]}\n（渲染失败：{e}）"
             report_json = dict(summary_json or {})
             report_json["provider_used"] = getattr(provider, "name", "")
             report_json["final_error"] = x_data.get("error") if isinstance(x_data, dict) else "unknown"

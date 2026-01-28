@@ -122,6 +122,13 @@ def render_report_text(
             return
         lines.append("")
         lines.append(label)
+        def _as_title(e: Any) -> str:
+            if isinstance(e, dict):
+                return str(e.get("title") or "").strip()
+            if isinstance(e, str):
+                return e.strip()
+            return ""
+
         for idx, it in enumerate(items, start=1):
             name = str(it.get("name") or "").strip()
             ts_code = str(it.get("ts_code") or "").strip()
@@ -144,7 +151,7 @@ def render_report_text(
             if isinstance(ae, list) and ae:
                 # 只展示前2条标题
                 for e in ae[:2]:
-                    t = _short((e or {}).get("title"), 44)
+                    t = _short(_as_title(e), 44)
                     if t:
                         lines.append(f"证据：{t}")
             else:

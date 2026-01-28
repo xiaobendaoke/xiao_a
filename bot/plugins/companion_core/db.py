@@ -121,6 +121,16 @@ def init_db():
             )
         """)
 
+        # 8) ✅ GitHub 周榜去重（避免一周重复推送）
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS github_weekly_push (
+                user_id TEXT,
+                week TEXT,
+                pushed_ts INTEGER DEFAULT 0,
+                PRIMARY KEY (user_id, week)
+            )
+        """)
+
 
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_state_last_active ON user_state(last_active_ts)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_state_cooldown ON user_state(cooldown_until_ts)")
@@ -581,6 +591,45 @@ async def weather_pushed_today(user_id: str, day: date) -> bool:
             return cur.fetchone() is not None
 
     return await asyncio.to_thread(_sync)
+
+
+async def github_weekly_pushed(user_id: str, week: str) -> bool:
+    """检查某用户本周是否已推送过 GitHub 周榜。week 建议用 ISO week，如 '2026-W05'。"""
+    uid = str(user_id)
+    wk = str(week or "").strip()
+    if not wk:
+        return False
+
+    def _sync() -> bool:
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT 1 FROM github_weekly_push WHERE user_id=? AND week=? LIMIT 1",
+                (uid, wk),
+            )
+            return cur.fetchone() is not None
+
+    return await asyncio.to_thread(_sync)
+
+
+async def github_weekly_mark_pushed(user_id: str, week: str) -> None:
+    """标记某用户本周已推送 GitHub 周榜。"""
+    uid = str(user_id)
+    wk = str(week or "").strip()
+    if not wk:
+        return
+    now_ts = int(datetime.now().timestamp())
+
+    def _sync() -> None:
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "INSERT OR REPLACE INTO github_weekly_push (user_id, week, pushed_ts) VALUES (?,?,?)",
+                (uid, wk, now_ts),
+            )
+            conn.commit()
+
+    await asyncio.to_thread(_sync)
 
 
 async def filter_active_user_ids(user_ids: list[int], now: Optional[datetime] = None) -> list[int]:
