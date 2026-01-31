@@ -16,6 +16,7 @@ import os
 from datetime import date, datetime
 
 from nonebot import get_bots, logger, require
+from nonebot.adapters.onebot.v11 import MessageSegment
 
 require("nonebot_plugin_apscheduler")
 from nonebot_plugin_apscheduler import scheduler
@@ -23,6 +24,8 @@ from nonebot_plugin_apscheduler import scheduler
 from .db import get_weather_user_targets, weather_mark_pushed, weather_pushed_today
 from .llm_weather import generate_morning_weather_text
 from .memory import add_memory
+from .mood import mood_manager
+from .voice.tts import synthesize_record_base64
 from .utils.open_meteo import geocode_city, fetch_forecast, summarize_today_weather
 from .utils.typing_speed import typing_delay_seconds
 
@@ -78,11 +81,26 @@ async def _push_weather_once(now: datetime):
             if not text:
                 continue
 
-            await asyncio.sleep(typing_delay_seconds(text, user_id=uid))
-            await bot.call_api("send_private_msg", user_id=int(uid), message=text)
+            # 尝试语音播报
+            sent_voice = False
+            try:
+                mood = mood_manager.get_user_mood(str(uid))
+                record_b64 = await synthesize_record_base64(text, mood=mood)
+                # 语音发送成功前稍微等待，模拟“录制发送”
+                await asyncio.sleep(typing_delay_seconds(text, user_id=uid) * 0.5)
+                await bot.call_api("send_private_msg", user_id=int(uid), message=MessageSegment.record(file=record_b64))
+                sent_voice = True
+                logger.info(f"[weather] sent voice uid={uid} city={city!r}")
+            except Exception as e:
+                logger.warning(f"[weather] tts failed uid={uid}, fallback to text: {e}")
+
+            if not sent_voice:
+                await asyncio.sleep(typing_delay_seconds(text, user_id=uid))
+                await bot.call_api("send_private_msg", user_id=int(uid), message=text)
+                logger.info(f"[weather] sent text uid={uid} city={city!r}")
+            
             add_memory(str(uid), "assistant", text)
             await weather_mark_pushed(uid, today)
-            logger.info(f"[weather] sent uid={uid} city={city!r}")
         except Exception as e:
             logger.exception(f"[weather] push failed uid={uid}: {e}")
 

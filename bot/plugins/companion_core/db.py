@@ -159,6 +159,33 @@ def init_db():
 
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_state_last_active ON user_state(last_active_ts)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_state_cooldown ON user_state(cooldown_until_ts)")
+
+        # 11) ✅ 日程提醒表
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS schedules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT,
+                trigger_time INTEGER,  -- Unix Timestamp
+                content TEXT,
+                status TEXT DEFAULT 'pending',  -- pending, done, cancelled
+                created_at INTEGER DEFAULT 0
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_schedules_trigger ON schedules(trigger_time)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_schedules_user ON schedules(user_id)")
+
+        # 12) ✅ 智能备忘录表
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS memos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT,
+                content TEXT,
+                tags TEXT,  -- JSON string or comma-separated
+                created_at INTEGER DEFAULT 0
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_memos_user ON memos(user_id)")
+
         conn.commit()
 
 # 初始化
@@ -895,5 +922,83 @@ def get_user_insights_summary(user_id: str) -> str:
         lines.append(f"- {label}：{', '.join(items[:5])}")
     
     return "\n".join(lines)
+
+
+# ================================
+# ✅ 日程提醒 (Schedules)
+# ================================
+
+def save_schedule(user_id: str, trigger_time: int, content: str) -> int:
+    """保存日程，返回 ID"""
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO schedules (user_id, trigger_time, content, status, created_at) VALUES (?, ?, ?, 'pending', ?)",
+            (str(user_id), int(trigger_time), str(content), int(datetime.now().timestamp()))
+        )
+        conn.commit()
+        return cursor.lastrowid
+
+def get_pending_schedules(trigger_before_ts: int) -> list[dict]:
+    """获取所有待触发的日程（status='pending' AND trigger_time <= ts）"""
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, user_id, content FROM schedules WHERE status='pending' AND trigger_time <= ?",
+            (int(trigger_before_ts),)
+        )
+        return [{"id": r[0], "user_id": r[1], "content": r[2]} for r in cursor.fetchall()]
+
+def update_schedule_status(schedule_id: int, status: str):
+    """更新日程状态 (done/cancelled)"""
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE schedules SET status=? WHERE id=?", (status, schedule_id))
+        conn.commit()
+
+
+# ================================
+# ✅ 智能备忘录 (Memos)
+# ================================
+
+def add_memo(user_id: str, content: str, tags: str = "") -> int:
+    """添加备忘录"""
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO memos (user_id, content, tags, created_at) VALUES (?, ?, ?, ?)",
+            (str(user_id), str(content), str(tags), int(datetime.now().timestamp()))
+        )
+        conn.commit()
+        return cursor.lastrowid
+
+def search_memos(user_id: str, keyword: str = "") -> list[dict]:
+    """搜索备忘录（简单的 LIKE 搜索）"""
+    uid = str(user_id)
+    kw = f"%{keyword}%"
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        if keyword:
+            cursor.execute(
+                "SELECT id, content, tags, created_at FROM memos WHERE user_id=? AND content LIKE ? ORDER BY created_at DESC LIMIT 20",
+                (uid, kw)
+            )
+        else:
+            cursor.execute(
+                "SELECT id, content, tags, created_at FROM memos WHERE user_id=? ORDER BY created_at DESC LIMIT 20",
+                (uid,)
+            )
+        return [
+            {"id": r[0], "content": r[1], "tags": r[2], "created_at": r[3]} 
+            for r in cursor.fetchall()
+        ]
+
+def delete_memo(user_id: str, memo_id: int) -> bool:
+    """删除备忘录"""
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM memos WHERE id=? AND user_id=?", (memo_id, str(user_id)))
+        conn.commit()
+        return cursor.rowcount > 0
 
 

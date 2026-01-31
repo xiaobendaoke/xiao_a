@@ -42,6 +42,8 @@ from .llm_stock import generate_stock_chat_text
 from .voice.asr import transcribe_audio_file
 from .voice.io import fetch_record_from_event
 from .voice.tts import synthesize_record_base64
+from .memo import try_handle_memo
+from .scheduler_custom import try_handle_schedule
 
 
 RATE_LIMIT_SECONDS = 1.2
@@ -627,8 +629,18 @@ async def handle_private_chat(event: PrivateMessageEvent):
         # 6) “总结”跟进：对上一条 ASK 的链接做总结
         await _handle_summary_followup_if_any(user_id, user_input, now)
 
+        # 6.5) 日程提醒
+        schedule_reply = await try_handle_schedule(str(user_id), user_input)
+        if schedule_reply:
+            await _send_bubbles_and_finish(schedule_reply, user_id=user_id)
+
         # 7) URL 自动处理：LLM 判断是否要总结/确认
         await _handle_url_auto_if_any(user_id, user_input, now)
+
+        # 7.2) 智能备忘录
+        memo_reply = await try_handle_memo(str(user_id), user_input)
+        if memo_reply:
+            await _send_bubbles_and_finish(memo_reply, user_id=user_id)
 
         # 7.5) 股票查询（私聊命令）
         await _handle_stock_query_if_any(user_id, user_input)
