@@ -59,8 +59,13 @@ services:
       - REDIS_URL=redis://redis:6379/
       - CACHE_EXPIRE=600
       - TZ=Asia/Shanghai
-      # 可选：配置代理访问国外源（如 BBC/Reuters）
-      # - PROXY_URI=http://host.docker.internal:7890
+      # 配置代理访问国外源（如 BBC/Reuters）
+      - PROXY_URI=http://host.docker.internal:7890
+      # 防止国内源走代理变慢（可选，根据需要调整）
+      # - PROXY_URL_REGEX=.*(github|bbc|reuters|hackernews|v2ex|solidot).*
+      # 需要 Cookie 的源
+      - WEIBO_COOKIES=${WEIBO_COOKIES}
+      - ZHIHU_COOKIES=${ZHIHU_COOKIES}
     depends_on:
       - redis
     extra_hosts:

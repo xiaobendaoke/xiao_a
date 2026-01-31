@@ -79,11 +79,11 @@ async def extract_insights_from_chats(
     
     # 调用 LLM 提取
     client = get_client()
-    settings = load_llm_settings()
+    _, _, model = load_llm_settings()
     
     try:
         response = await client.chat.completions.create(
-            model=settings.get("model", "qwen-plus"),
+            model=model or "qwen-plus",
             messages=[
                 {"role": "system", "content": INSIGHT_SYSTEM_PROMPT},
                 {"role": "user", "content": f"以下是用户最近的对话记录：\n\n{chat_text}"},
