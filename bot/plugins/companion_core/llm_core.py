@@ -9,6 +9,7 @@
 - `llm_client.py`：加载配置 + 复用 AsyncOpenAI 客户端
 - `llm_news.py`：新闻/热点检索线索 + 来源链接暂存
 - `llm_tags.py`：MOOD/PROFILE 标签抽取与清洗
+- `skills/`：动态能力加载系统（金融分析等专业模块）
 """
 
 from __future__ import annotations
@@ -30,6 +31,8 @@ from .llm_news import (
 )
 from .llm_tags import extract_tags_and_clean
 from .llm_weather import WEATHER_QA_SYSTEM
+from .skills.router import route_skill
+from .skills.executor import execute_skill_data, build_skill_prompt
 
 # 兼容旧引用（llm_web/llm_proactive 可能还没改时）
 _get_client = get_client
@@ -60,6 +63,14 @@ async def get_ai_reply(user_id: str, user_text: str, *, voice_mode: bool = False
         client = get_client()
         _, _, model = load_llm_settings()
 
+        # ✅ Skills 路由：判断是否需要专业能力模块
+        skill_name = await route_skill(user_text)
+        skill_prompt = None
+        if skill_name:
+            logger.info(f"[skills] 激活专业模块: {skill_name}")
+            skill_data = await execute_skill_data(skill_name)
+            skill_prompt = build_skill_prompt(skill_name, skill_data)
+
         world_context = await get_world_prompt(user_id, user_text=user_text)
         web_search_context, web_sources = await maybe_get_web_search_context(user_text)
         current_mood = mood_manager.get_user_mood(user_id)
@@ -89,6 +100,9 @@ async def get_ai_reply(user_id: str, user_text: str, *, voice_mode: bool = False
             messages.append({"role": "system", "content": NEWS_ANSWER_SYSTEM})
         if _is_weather_query(user_text):
             messages.append({"role": "system", "content": WEATHER_QA_SYSTEM})
+        # ✅ 注入 skill 专业能力 prompt
+        if skill_prompt:
+            messages.append({"role": "system", "content": skill_prompt})
 
         messages.append(
             {

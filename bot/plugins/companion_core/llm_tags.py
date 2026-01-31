@@ -1,8 +1,12 @@
-"""LLM 输出标签解析（仅负责“从回复里抽取系统标签”）。
+"""LLM 输出标签解析（仅负责"从回复里抽取系统标签"）。
 
 支持两类标签（兼容独立成行/贴在句尾）：
 - `[MOOD_CHANGE:x]`
 - `[UPDATE_PROFILE:键=值]`（可多条）
+
+同时清理不应出现在用户可见回复中的内容：
+- `[表情：xxx]` / `[动作：xxx]` 等方括号标记
+- `（xxx）` 圆括号旁白/动作描述
 """
 
 from __future__ import annotations
@@ -14,6 +18,13 @@ PROFILE_TAG_RE = re.compile(
     r"\[UPDATE_PROFILE[:：]\s*([^\]=:：]+?)\s*[=：:]\s*([^\]]+?)\s*\]",
     re.IGNORECASE,
 )
+
+# 清理：[表情：xxx] / [动作：xxx] / [心情：xxx] 等中文方括号标记
+BRACKET_TAG_RE = re.compile(r"\[(?:表情|动作|心情|情绪|语气|状态|神态|想法)[:：]?[^\]]*\]", re.IGNORECASE)
+
+# 清理：（旁白/动作描述）—— 中文圆括号包裹的短文本（通常是舞台指示）
+# 限制长度避免误删正常括号内容
+PAREN_ASIDE_RE = re.compile(r"（[^）]{1,20}）")
 
 
 def extract_tags_and_clean(raw: str) -> tuple[str, int | None, list[tuple[str, str]]]:
@@ -37,11 +48,17 @@ def extract_tags_and_clean(raw: str) -> tuple[str, int | None, list[tuple[str, s
         if k and v:
             updates.append((k, v))
 
+    # 移除系统标签
     cleaned = MOOD_TAG_RE.sub("", raw or "")
     cleaned = PROFILE_TAG_RE.sub("", cleaned)
+    
+    # 移除表情/动作等方括号标记
+    cleaned = BRACKET_TAG_RE.sub("", cleaned)
+    
+    # 移除圆括号旁白（舞台指示）
+    cleaned = PAREN_ASIDE_RE.sub("", cleaned)
 
     lines = [re.sub(r"[ \t]+", " ", line).rstrip() for line in cleaned.splitlines()]
     clean_text = "\n".join(lines).strip()
     mood_change = mood_values[-1] if mood_values else None
     return clean_text, mood_change, updates
-

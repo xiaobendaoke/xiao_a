@@ -17,6 +17,7 @@
 - 图片理解：Qwen-VL（DashScope OpenAI 兼容接口）
 - QQ 语音对话：语音 → ASR → LLM → TTS → 语音（DashScope）
 - 天气 / 股票：更像“日常工具型技能”，同时保持陪伴口吻
+- **Skills 动态能力系统**：金融分析等专业模块，LLM 自动路由 + 实时数据
 - 主动互动/定时推送：RSS 推送、GitHub 周榜推送、晨间天气提醒等
 - 外部 HTTP API：`POST /api/chat`（适配 STM32/局域网设备）
 - 财经日报：A 股收盘复盘（私聊订阅制，独立数据库）
@@ -29,7 +30,7 @@ QQ <-> NapCat (OneBot v11)
           | WebSocket Client: ws://nonebot:8080/onebot/v11/ws  (token 必须一致)
           v
       NoneBot2 (FastAPI Driver)
-        |-- plugins/companion_core  (对话/记忆/情绪/搜索/看图/语音/推送/HTTP API)
+        |-- plugins/companion_core  (对话/记忆/情绪/搜索/看图/语音/推送/skills)
         |-- plugins/finance_daily   (A股收盘日报/订阅制)
         `-- SQLite: data.db / finance.db
 ```
@@ -44,6 +45,7 @@ QQ <-> NapCat (OneBot v11)
   - `bot/bot.py`：启动入口（注册适配器、加载插件）
   - `bot/.env`：运行配置（从 `.env.example` 复制）
   - `bot/plugins/companion_core/`：小a核心能力
+    - `skills/`：动态能力加载系统
   - `bot/plugins/finance_daily/`：财经日报插件
 
 ## 快速开始（Docker Compose）
@@ -302,6 +304,20 @@ docker compose exec nonebot python plugins/companion_core/voice/qwen_voice_clone
 - `财经日报 强制`：只对当前用户跑一次并回发（不影响订阅）
 - `财经状态`：查看最近一次任务状态与当前配置
 
+### 8) Skills 专业能力模块
+
+小a 内置了动态能力加载系统（Skills），当你问专业问题时，会自动调用相应模块：
+
+| Skill | 触发示例 | 说明 |
+|-------|----------|------|
+| **金融分析** | "推荐个股票"、"今天涨幅榜" | 获取实时涨跌榜数据 |
+| **编程助手** | "帮我写一个快速排序"、"这段代码什么意思" | 代码+解释 |
+| **情感支持** | "心情不好"、"压力好大" | 专业共情陪伴 |
+| **生活助手** | "今天吃什么"、"鸡肉怎么做" | 菜谱推荐（TheMealDB API） |
+
+添加更多 Skills：在 `bot/plugins/companion_core/skills/` 下创建 `.skill.md` 文件即可，无需改代码。
+
+
 ## 外部 HTTP API（可选）
 
 用于把“小a”的对话能力暴露为 HTTP 接口，并复用 QQ 的同一套“记忆/情绪/画像”。
@@ -402,13 +418,24 @@ docker compose up -d --build nonebot
 ### 代码阅读入口（建议）
 
 - 私聊入口：`bot/plugins/companion_core/handlers.py`
-- 对话编排：`bot/plugins/companion_core/llm.py`
-- LLM 连接与配置：`bot/plugins/companion_core/llm_client.py`
+- 对话编排：`bot/plugins/companion_core/llm_core.py`
+- Skills 系统：`bot/plugins/companion_core/skills/`
 - 新闻/搜索：`bot/plugins/companion_core/llm_news.py`
 - URL 总结：`bot/plugins/companion_core/llm_web.py`
 - 图片理解：`bot/plugins/companion_core/llm_vision.py`
 - 语音 ASR/TTS：`bot/plugins/companion_core/voice/asr.py` / `bot/plugins/companion_core/voice/tts.py`
 - 财经日报：`bot/plugins/finance_daily/`
+
+### 内部 API 说明
+
+以下 API 是内部实现细节，通常不需要用户修改（除非源接口故障需要切换）：
+
+| 用途 | API 提供商 | 说明 |
+|------|------------|------|
+| A 股行情快照 | 东方财富 / 新浪财经 | 涨跌榜、股票查询 |
+| 公司画像/公告 | 东方财富 F10 | 财经日报、股票查询 |
+| 菜谱推荐 | TheMealDB | 生活助手 skill（可通过 `THEMEALDB_URL` 配置） |
+
 
 ## 常见问题（Troubleshooting）
 
