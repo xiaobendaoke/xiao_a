@@ -117,7 +117,7 @@ async def get_ai_reply(user_id: str, user_text: str, *, voice_mode: bool = False
         response = await client.chat.completions.create(
             model=model,
             messages=messages,
-            temperature=0.65,          # ✅ 稍微降一点，更少“演”
+            temperature=0.75,          # 调高一点，增加情感表达变化”
             # frequency_penalty=0.2,   # 如果你的网关支持，可打开：减少复读/口癖
             timeout=30.0
         )

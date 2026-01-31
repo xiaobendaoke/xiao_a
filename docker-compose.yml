@@ -45,3 +45,33 @@ services:
     
     
     # 语音已切到 DashScope（ASR/TTS），不再依赖 GPT-SoVITS
+
+  # === RSSHub 信息聚合服务 ===
+  rsshub:
+    image: diygod/rsshub:latest
+    container_name: rsshub
+    restart: unless-stopped
+    ports:
+      - "1200:1200"
+    environment:
+      - NODE_ENV=production
+      - CACHE_TYPE=redis
+      - REDIS_URL=redis://redis:6379/
+      - CACHE_EXPIRE=600
+      - TZ=Asia/Shanghai
+      # 可选：配置代理访问国外源（如 BBC/Reuters）
+      # - PROXY_URI=http://host.docker.internal:7890
+    depends_on:
+      - redis
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  redis:
+    image: redis:alpine
+    container_name: rsshub-redis
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+
+volumes:
+  redis-data:
