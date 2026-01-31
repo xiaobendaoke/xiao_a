@@ -139,6 +139,7 @@ async def push_to_user(
     if not text.strip():
         return False
     
+    try:
         # 模拟打字延迟并分段发送
         parts = [p.strip() for p in text.splitlines() if p.strip()]
         for part in parts:
@@ -180,8 +181,9 @@ async def push_messages(
         if not text.strip():
             continue
         
-        # 模拟打字延迟并分段发送
-        parts = [p.strip() for p in text.splitlines() if p.strip()]
+        try:
+            # 模拟打字延迟并分段发送
+            parts = [p.strip() for p in text.splitlines() if p.strip()]
         for part in parts:
             await asyncio.sleep(typing_delay_seconds(part, user_id=user_id))
             await bot.call_api("send_private_msg", user_id=uid, message=part)
