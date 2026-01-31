@@ -24,7 +24,9 @@ from nonebot import on_message, on_notice, get_bot, logger
 from nonebot.adapters.onebot.v11 import PrivateMessageEvent, Message, MessageSegment
 from nonebot.exception import FinishedException
 from nonebot.rule import Rule, to_me
-from .llm import get_ai_reply, consume_search_sources
+# 注意：llm_core.py（原 llm.py）避免和 llm/ 文件夹冲突
+from .llm_core import get_ai_reply
+from .llm_news import consume_search_sources
 from .db import touch_active, save_profile_item, log_user_active_hour
 from .utils.world_info import get_time_description, get_time_period
 from .utils.typing_speed import typing_delay_seconds

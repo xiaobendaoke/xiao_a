@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 
 from nonebot import get_driver, logger
 
-from .llm import get_ai_reply
+from .llm_core import get_ai_reply
 
 
 class ChatRequest(BaseModel):
