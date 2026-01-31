@@ -13,7 +13,10 @@ from nonebot import get_bots, logger
 
 from ..db import get_idle_user_states, touch_active
 from ..memory import add_memory
+from ..db import get_idle_user_states, touch_active
+from ..memory import add_memory
 from ..utils.typing_speed import typing_delay_seconds
+from ..llm_tags import extract_tags_and_clean
 
 from . import config
 from .models import InfoItem
@@ -131,12 +134,16 @@ async def push_to_user(
     if not text:
         return False
     
-    try:
-        # 模拟打字延迟
-        await asyncio.sleep(typing_delay_seconds(text, user_id=user_id))
-        
-        # 发送消息
-        await bot.call_api("send_private_msg", user_id=uid, message=text)
+    # 清理标签（动作/表情等）
+    text, _, _ = extract_tags_and_clean(text)
+    if not text.strip():
+        return False
+    
+        # 模拟打字延迟并分段发送
+        parts = [p.strip() for p in text.splitlines() if p.strip()]
+        for part in parts:
+            await asyncio.sleep(typing_delay_seconds(part, user_id=user_id))
+            await bot.call_api("send_private_msg", user_id=uid, message=part)
         
         # 记录
         add_memory(str(user_id), "assistant", text)
@@ -168,9 +175,16 @@ async def push_messages(
         if not text:
             continue
         
-        try:
-            await asyncio.sleep(typing_delay_seconds(text, user_id=user_id))
-            await bot.call_api("send_private_msg", user_id=uid, message=text)
+        # 清理标签（动作/表情等）
+        text, _, _ = extract_tags_and_clean(text)
+        if not text.strip():
+            continue
+        
+        # 模拟打字延迟并分段发送
+        parts = [p.strip() for p in text.splitlines() if p.strip()]
+        for part in parts:
+            await asyncio.sleep(typing_delay_seconds(part, user_id=user_id))
+            await bot.call_api("send_private_msg", user_id=uid, message=part)
             add_memory(str(user_id), "assistant", text)
             
             if item_id:

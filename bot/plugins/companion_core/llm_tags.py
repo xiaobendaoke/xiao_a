@@ -19,8 +19,8 @@ PROFILE_TAG_RE = re.compile(
     re.IGNORECASE,
 )
 
-# 清理：[表情：xxx] / [动作：xxx] / [心情：xxx] 等中文方括号标记
-BRACKET_TAG_RE = re.compile(r"\[(?:表情|动作|心情|情绪|语气|状态|神态|想法)[:：]?[^\]]*\]", re.IGNORECASE)
+# 清理：[表情：xxx] / [动作：xxx] / [突然弹你脑门] 等所有方括号标记
+BRACKET_TAG_RE = re.compile(r"\[[^\]]+\]", re.IGNORECASE)
 
 # 清理：（旁白/动作描述）—— 中文圆括号包裹的短文本（通常是舞台指示）
 # 限制长度避免误删正常括号内容
