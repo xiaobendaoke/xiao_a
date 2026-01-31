@@ -184,16 +184,16 @@ async def push_messages(
         try:
             # 模拟打字延迟并分段发送
             parts = [p.strip() for p in text.splitlines() if p.strip()]
-        for part in parts:
-            await asyncio.sleep(typing_delay_seconds(part, user_id=user_id))
-            await bot.call_api("send_private_msg", user_id=uid, message=part)
-            add_memory(str(user_id), "assistant", text)
-            
-            if item_id:
-                pool.mark_pushed(item_id, user_id)
-            
-            increment_daily_push_count(user_id)
-            success += 1
+            for part in parts:
+                await asyncio.sleep(typing_delay_seconds(part, user_id=user_id))
+                await bot.call_api("send_private_msg", user_id=uid, message=part)
+                add_memory(str(user_id), "assistant", text)
+                
+                if item_id:
+                    pool.mark_pushed(item_id, user_id)
+                
+                increment_daily_push_count(user_id)
+                success += 1
         except Exception as e:
             logger.error(f"[info_agent] push message failed {user_id}: {e}")
             break

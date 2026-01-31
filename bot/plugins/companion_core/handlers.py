@@ -196,21 +196,65 @@ def _looks_like_voice_reply_request(text: str) -> bool:
 
 
 def _bubble_parts(text: str) -> list[str]:
-    """把要发送的文本拆成“气泡段落”，模拟真人分段发送。"""
+    """把要发送的文本拆成“气泡段落”，模拟真人分段发送（增强版）。"""
     s = str(text or "").strip()
     if not s:
         return []
 
-    parts = [p.strip() for p in s.splitlines() if p.strip()]
-    if len(parts) <= 1 and len(s) >= 18:
-        # 单行但偏长：按句末标点拆成“短句气泡”
-        parts = [p.strip() for p in re.split(r"(?<=[。！？!?])\s*", s) if p.strip()] or parts
-        if len(parts) <= 1 and len(s) >= 36:
-            parts = [p.strip() for p in re.split(r"(?<=[，,、])\s*", s) if p.strip()] or parts
+    # 1. 先按换行符拆
+    raw_lines = [p.strip() for p in s.splitlines() if p.strip()]
+    
+    parts = []
+    for line in raw_lines:
+        # 如果单行过长（>25字），尝试进一步拆分
+        if len(line) > 25:
+            # 2. 按句末标点拆（。！？!?）
+            # split by (punctuations + optional spaces)
+            # keep the punctuation with the preceding sentence
+            subs = re.split(r"([。！？!?])\s*", line)
+            # re.split with modifying group returns [part1, sep1, part2, sep2...]
+            # We need to recombine them: "Hello!" -> ["Hello", "!", ""]
+            
+            recombined = []
+            current = ""
+            for x in subs:
+                x = x.strip()
+                if not x: 
+                    continue
+                if x in "。！？!?":
+                    current += x
+                    recombined.append(current)
+                    current = ""
+                else:
+                    if current: # 处理像 "A。B" 这种没空格的情况
+                        recombined.append(current)
+                    current = x
+            if current:
+                recombined.append(current)
+            
+            # 3. 如果还是有长句（>25字），且中间有空格，按空格拆（针对“微信空格流”打字习惯）
+            final_subs = []
+            for sub in recombined:
+                if len(sub) > 25 and " " in sub:
+                     # 只有当空格确实把句子分成了较长的两部分时才拆
+                     # 避免把 "Hello World" 这种短语拆了
+                    spaced = [sp.strip() for sp in sub.split(" ") if sp.strip()]
+                    final_subs.extend(spaced)
+                else:
+                    final_subs.append(sub)
+            
+            parts.extend(final_subs)
+        else:
+            parts.append(line)
 
-    if len(parts) > 4:
-        parts = parts[:3] + [" ".join(parts[3:])]
-    return parts
+    # 4. 合并过短的碎片（可选，避免切太碎），这里暂不合并，保持节奏感
+    
+    # 限制气泡数量，避免刷屏太严重
+    if len(parts) > 5:
+        # 保留前4个，剩下的合并
+        parts = parts[:4] + [" ".join(parts[4:])]
+        
+    return [p for p in parts if p.strip()]
 
 
 def _maybe_learn_city_from_user_text(user_id: int, user_input: str) -> None:
