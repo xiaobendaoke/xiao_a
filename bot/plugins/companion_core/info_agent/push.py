@@ -9,6 +9,7 @@ import asyncio
 from datetime import datetime, date, time
 from typing import Any
 
+import re
 from nonebot import get_bots, logger
 
 from ..db import get_idle_user_states, touch_active
@@ -21,6 +22,60 @@ from ..llm_tags import extract_tags_and_clean
 from . import config
 from .models import InfoItem
 from . import pool
+
+
+def _bubble_parts(text: str) -> list[str]:
+    """把要发送的文本拆成“气泡段落”，模拟真人分段发送（增强版）。"""
+    s = str(text or "").strip()
+    if not s:
+        return []
+
+    # 1. 先按换行符拆
+    raw_lines = [p.strip() for p in s.splitlines() if p.strip()]
+    
+    parts = []
+    for line in raw_lines:
+        # 如果单行过长（>25字），尝试进一步拆分
+        if len(line) > 25:
+            # 2. 按句末标点拆（。！？!?）
+            subs = re.split(r"([。！？!?])\s*", line)
+            
+            recombined = []
+            current = ""
+            for x in subs:
+                x = x.strip()
+                if not x: 
+                    continue
+                if x in "。！？!?":
+                    current += x
+                    recombined.append(current)
+                    current = ""
+                else:
+                    if current:
+                        recombined.append(current)
+                    current = x
+            if current:
+                recombined.append(current)
+            
+            # 3. 如果还是有长句（>25字），且中间有空格，按空格拆
+            final_subs = []
+            for sub in recombined:
+                if len(sub) > 25 and " " in sub:
+                     # 只有当空格确实把句子分成了较长的两部分时才拆
+                    spaced = [sp.strip() for sp in sub.split(" ") if sp.strip()]
+                    final_subs.extend(spaced)
+                else:
+                    final_subs.append(sub)
+            
+            parts.extend(final_subs)
+        else:
+            parts.append(line)
+
+    # 限制气泡数量
+    if len(parts) > 6:
+        parts = parts[:5] + [" ".join(parts[5:])]
+        
+    return [p for p in parts if p.strip()]
 
 
 # 每日推送计数（user_id -> {date: count}）
@@ -141,7 +196,7 @@ async def push_to_user(
     
     try:
         # 模拟打字延迟并分段发送
-        parts = [p.strip() for p in text.splitlines() if p.strip()]
+        parts = _bubble_parts(text)
         for part in parts:
             await asyncio.sleep(typing_delay_seconds(part, user_id=user_id))
             await bot.call_api("send_private_msg", user_id=uid, message=part)
@@ -183,7 +238,7 @@ async def push_messages(
         
         try:
             # 模拟打字延迟并分段发送
-            parts = [p.strip() for p in text.splitlines() if p.strip()]
+            parts = _bubble_parts(text)
             for part in parts:
                 await asyncio.sleep(typing_delay_seconds(part, user_id=user_id))
                 await bot.call_api("send_private_msg", user_id=uid, message=part)
