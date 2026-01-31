@@ -33,6 +33,7 @@ from .db import (
     mark_proactive_sent,
 )
 from .llm_proactive import generate_proactive_message
+from .llm_insights import update_user_insights
 from .memory import add_memory
 from .utils.typing_speed import typing_delay_seconds
 
@@ -129,6 +130,12 @@ async def proactive_job():
 
     # 每轮最多发 1 个，避免太“机器人”
     for cand in candidates:
+        # 顺便更新用户洞察（从聊天记录学习用户特征）
+        try:
+            await update_user_insights(str(cand.user_id))
+        except Exception as e:
+            logger.debug(f"[proactive] update insights failed: {e}")
+        
         sent = await _handle_one_candidate(bot, cand)
         if sent:
             break

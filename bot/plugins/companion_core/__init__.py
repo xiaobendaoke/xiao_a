@@ -18,6 +18,7 @@ from . import proactive  # noqa: F401  # 注册主动互动定时任务
 from . import github_weekly_push  # noqa: F401  # 注册 GitHub 周榜定时推送
 from . import weather_push  # noqa: F401  # 注册天气早晨提醒定时任务
 from . import info_agent  # noqa: F401  # 注册 Info Agent 智能推送
+from . import finance_daily  # noqa: F401  # 注册股票小白日报
 
 __plugin_meta__ = PluginMetadata(
     name="AI伴侣核心",

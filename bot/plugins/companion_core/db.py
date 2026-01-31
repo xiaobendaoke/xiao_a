@@ -142,6 +142,20 @@ def init_db():
             )
         """)
 
+        # 10) ✅ 用户洞察（从聊天记录提取的兴趣/偏好/习惯）
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS user_insights (
+                user_id TEXT,
+                insight_type TEXT,
+                content TEXT,
+                confidence REAL DEFAULT 0.5,
+                created_ts INTEGER DEFAULT 0,
+                last_updated_ts INTEGER DEFAULT 0,
+                PRIMARY KEY (user_id, insight_type, content)
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_insights_type ON user_insights(user_id, insight_type)")
+
 
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_state_last_active ON user_state(last_active_ts)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_state_cooldown ON user_state(cooldown_until_ts)")
@@ -765,4 +779,121 @@ def get_user_active_hours_sync(user_id: str) -> dict[int, int]:
             (uid,),
         )
         return {int(h): int(c) for h, c in cur.fetchall()}
+
+
+# ================================
+# ✅ 用户洞察（从聊天记录提取的兴趣/偏好/习惯）
+# ================================
+
+def save_user_insight(
+    user_id: str,
+    insight_type: str,
+    content: str,
+    confidence: float = 0.5,
+) -> None:
+    """
+    保存用户洞察。
+    
+    Args:
+        user_id: 用户 ID
+        insight_type: 洞察类型（interest/preference/habit/topic）
+        content: 洞察内容
+        confidence: 置信度 0-1
+    """
+    uid = str(user_id)
+    itype = str(insight_type or "").strip()
+    cont = str(content or "").strip()
+    if not itype or not cont:
+        return
+    
+    now_ts = int(datetime.now().timestamp())
+    confidence = max(0.0, min(1.0, float(confidence)))
+    
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO user_insights (user_id, insight_type, content, confidence, created_ts, last_updated_ts)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, insight_type, content) DO UPDATE SET
+                confidence = MAX(confidence, excluded.confidence),
+                last_updated_ts = excluded.last_updated_ts
+            """,
+            (uid, itype, cont, confidence, now_ts, now_ts),
+        )
+        conn.commit()
+
+
+def get_user_insights(user_id: str, insight_type: str | None = None) -> list[dict]:
+    """
+    获取用户洞察。
+    
+    Args:
+        user_id: 用户 ID
+        insight_type: 可选，筛选特定类型（interest/preference/habit/topic）
+        
+    Returns:
+        洞察列表 [{"type": "...", "content": "...", "confidence": 0.8}, ...]
+    """
+    uid = str(user_id)
+    
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        if insight_type:
+            cur.execute(
+                """
+                SELECT insight_type, content, confidence
+                FROM user_insights
+                WHERE user_id=? AND insight_type=?
+                ORDER BY confidence DESC, last_updated_ts DESC
+                """,
+                (uid, str(insight_type)),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT insight_type, content, confidence
+                FROM user_insights
+                WHERE user_id=?
+                ORDER BY confidence DESC, last_updated_ts DESC
+                """,
+                (uid,),
+            )
+        
+        return [
+            {"type": str(t), "content": str(c), "confidence": float(conf)}
+            for t, c, conf in cur.fetchall()
+        ]
+
+
+def get_user_insights_summary(user_id: str) -> str:
+    """
+    获取用户洞察的文本摘要（用于构建 LLM 上下文）。
+    """
+    insights = get_user_insights(user_id)
+    if not insights:
+        return ""
+    
+    # 按类型分组
+    by_type: dict[str, list[str]] = {}
+    type_labels = {
+        "interest": "兴趣",
+        "preference": "偏好",
+        "habit": "习惯",
+        "topic": "关注话题",
+    }
+    
+    for ins in insights[:20]:  # 最多取 20 条
+        t = ins["type"]
+        label = type_labels.get(t, t)
+        if label not in by_type:
+            by_type[label] = []
+        by_type[label].append(ins["content"])
+    
+    lines = []
+    for label, items in by_type.items():
+        lines.append(f"- {label}：{', '.join(items[:5])}")
+    
+    return "\n".join(lines)
+
 

@@ -16,6 +16,7 @@ from ..llm_client import get_client, load_llm_settings
 from ..db import get_all_profile
 from ..memory import get_chat_history
 from ..mood import mood_manager
+from ..llm_insights import get_insights_for_agent
 
 from .models import InfoItem
 
@@ -36,6 +37,12 @@ AGENT_SYSTEM_PROMPT = """你是小a的信息助手模块。现在需要从信息
 - 避免重复话题
 - 避免过于专业/晦涩的内容
 - 如果没有特别值得推的，宁愿不推
+
+文案风格：
+- 像发微信一样自然口语化
+- 最多用 1 个 emoji，也可以完全不用
+- 禁止每行结尾都加 emoji
+- 用语气词表达情绪，不依赖表情符号
 
 输出格式（严格 JSON）：
 {
@@ -66,8 +73,14 @@ def _build_user_context(user_id: str) -> str:
     
     mood_desc = mood_manager.get_mood_desc(user_id)
     
+    # 获取用户洞察（兴趣/偏好/习惯）
+    insights_str = get_insights_for_agent(user_id)
+    
     return f"""用户画像：
 {profile_str}
+
+用户洞察（从历史对话中学习到的特征）：
+{insights_str}
 
 最近聊天：
 {history_str}
