@@ -66,7 +66,7 @@ INFO_FEEDS_WORLD = _env_list("INFO_FEEDS_WORLD", [
 
 # 合并所有源
 def get_all_feeds() -> dict[str, list[str]]:
-    """返回所有信息源，按分类组织"""
+    """返回所有 RSSHub 信息源，按分类组织"""
     return {
         "tech": INFO_FEEDS_TECH,
         "finance": INFO_FEEDS_FINANCE,
@@ -75,21 +75,39 @@ def get_all_feeds() -> dict[str, list[str]]:
     }
 
 
+# === 直接 RSS 源（不依赖 RSSHub，作为备选）===
+DIRECT_RSS_FEEDS = _env_list("DIRECT_RSS_FEEDS", [
+    # 科技
+    "https://sspai.com/feed",               # 少数派
+    "https://www.solidot.org/index.rss",    # Solidot
+    "https://news.ycombinator.com/rss",     # Hacker News
+    # 综合/财经
+    "https://www.36kr.com/feed",            # 36氪
+    "https://www.huxiu.com/rss/0.xml",      # 虎嗅
+    "http://www.ftchinese.com/rss/news",    # FT中文网
+])
+
+
 # === 推送策略配置 ===
 INFO_AGENT_ENABLED = _env_bool("INFO_AGENT_ENABLED", True)
 INFO_AGENT_CHECK_INTERVAL_MINUTES = _env_int("INFO_AGENT_CHECK_INTERVAL_MINUTES", 30)
-INFO_AGENT_DAILY_LIMIT = _env_int("INFO_AGENT_DAILY_LIMIT", 5)  # 每天最多推送几条
+INFO_AGENT_DAILY_LIMIT = _env_int("INFO_AGENT_DAILY_LIMIT", 3)  # 每天最多推送几条（避免刷屏）
 INFO_AGENT_IDLE_MINUTES_MIN = _env_int("INFO_AGENT_IDLE_MINUTES_MIN", 30)  # 用户空闲多久后才推
 
 # === 免打扰时间 ===
 INFO_AGENT_QUIET_START_HOUR = _env_int("INFO_AGENT_QUIET_START_HOUR", 23)
 INFO_AGENT_QUIET_END_HOUR = _env_int("INFO_AGENT_QUIET_END_HOUR", 8)
 
-# === 推送时段（优先在这些时段推送）===
-INFO_AGENT_PUSH_HOURS = _env_list("INFO_AGENT_PUSH_HOURS", ["8", "12", "18"])
+# === 智能时段配置 ===
+# 不再使用固定推送时段，改为学习用户活跃时间
+# 以下为兜底配置（当用户数据不足时使用）
+INFO_AGENT_FALLBACK_PUSH_HOURS = _env_list("INFO_AGENT_FALLBACK_PUSH_HOURS", ["9", "13", "19"])
+# 活跃度阈值：用户在某小时的消息占比超过此值才认为是活跃时段
+INFO_AGENT_ACTIVE_HOUR_THRESHOLD = 0.05  # 5%
 
 # === 过滤规则 ===
 GOSSIP_KEYWORDS = [
     "明星", "娱乐圈", "八卦", "粉丝", "演唱会", "主演",
     "恋情", "出轨", "录制", "综艺", "流量", "剧组", "绯闻", "私生饭",
 ]
+

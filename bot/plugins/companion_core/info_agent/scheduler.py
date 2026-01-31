@@ -64,7 +64,8 @@ async def _run_push_cycle() -> None:
                 continue
             
             # 优先时段检查（非优先时段降低推送概率）
-            if not push.in_preferred_hours(now) and daily_count > 0:
+            # 智能学习：根据用户历史活跃时间判断
+            if not push.in_preferred_hours(now, user_id=user_id) and daily_count > 0:
                 continue
             
             # 获取候选信息

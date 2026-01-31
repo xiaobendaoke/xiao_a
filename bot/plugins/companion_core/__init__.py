@@ -5,7 +5,7 @@
 - 通过导入子模块触发注册：
   - `handlers`：注册私聊消息处理器；
   - `proactive`：注册主动互动定时任务；
-  - `rss_push`：注册 RSS 定时推送任务。
+  - `info_agent`：注册智能信息推送（替代原 rss_push）。
 
 注意：这些子模块在 import 时会产生副作用（注册 handler/scheduler、初始化 DB 等）。
 """
@@ -14,7 +14,7 @@ from nonebot.plugin import PluginMetadata
 from . import handlers # 导入即注册
 from . import http_api  # noqa: F401  # 注册 HTTP API（STM32 等额外入口）
 from . import proactive  # noqa: F401  # 注册主动互动定时任务
-from . import rss_push   # noqa: F401  # 注册RSS主动分享定时任务
+# from . import rss_push   # noqa: F401  # 已废弃，由 info_agent 替代
 from . import github_weekly_push  # noqa: F401  # 注册 GitHub 周榜定时推送
 from . import weather_push  # noqa: F401  # 注册天气早晨提醒定时任务
 from . import info_agent  # noqa: F401  # 注册 Info Agent 智能推送

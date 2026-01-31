@@ -25,7 +25,7 @@ from nonebot.adapters.onebot.v11 import PrivateMessageEvent, Message, MessageSeg
 from nonebot.exception import FinishedException
 from nonebot.rule import Rule, to_me
 from .llm import get_ai_reply, consume_search_sources
-from .db import touch_active, save_profile_item
+from .db import touch_active, save_profile_item, log_user_active_hour
 from .utils.world_info import get_time_description, get_time_period
 from .utils.typing_speed import typing_delay_seconds
 from .llm_vision import extract_images_and_text, generate_image_reply
@@ -552,6 +552,7 @@ async def handle_private_chat(event: PrivateMessageEvent):
         record_seg = next((seg for seg in message if getattr(seg, "type", "") == "record"), None)
         if record_seg is not None:
             touch_active(str(user_id))
+            log_user_active_hour(str(user_id))  # 记录活跃小时
             now = time.time()
             if not _check_and_update_rate_limit(user_id, now):
                 return
@@ -599,6 +600,7 @@ async def handle_private_chat(event: PrivateMessageEvent):
 
         # ✅ 一进来就记录活跃
         touch_active(str(user_id))
+        log_user_active_hour(str(user_id))  # 记录活跃小时（用于学习用户习惯）
 
         # ✅ 尝试记住用户所在地（用户回答城市时不依赖 LLM 标签）
         _maybe_learn_city_from_user_text(user_id, user_input)

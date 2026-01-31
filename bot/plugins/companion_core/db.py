@@ -131,6 +131,17 @@ def init_db():
             )
         """)
 
+        # 9) ✅ 用户活跃小时统计（学习用户习惯，决定推送时段）
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS user_active_hours (
+                user_id TEXT,
+                hour INTEGER,
+                count INTEGER DEFAULT 0,
+                last_updated_ts INTEGER DEFAULT 0,
+                PRIMARY KEY (user_id, hour)
+            )
+        """)
+
 
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_state_last_active ON user_state(last_active_ts)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_state_cooldown ON user_state(cooldown_until_ts)")
@@ -693,3 +704,65 @@ async def weather_mark_pushed(user_id: str, day: date) -> None:
             conn.commit()
 
     await asyncio.to_thread(_sync)
+
+
+# ================================
+# ✅ 用户活跃小时统计（学习用户习惯）
+# ================================
+
+def log_user_active_hour(user_id: str, hour: int | None = None) -> None:
+    """
+    记录用户在某个小时活跃（每次用户发消息时调用）。
+    hour 默认取当前小时。
+    """
+    uid = str(user_id)
+    if hour is None:
+        hour = datetime.now().hour
+    hour = int(hour) % 24
+    now_ts = int(datetime.now().timestamp())
+    
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO user_active_hours (user_id, hour, count, last_updated_ts)
+            VALUES (?, ?, 1, ?)
+            ON CONFLICT(user_id, hour) DO UPDATE SET
+                count = count + 1,
+                last_updated_ts = excluded.last_updated_ts
+            """,
+            (uid, hour, now_ts),
+        )
+        conn.commit()
+
+
+async def get_user_active_hours(user_id: str) -> dict[int, int]:
+    """
+    获取用户各小时的活跃计数：{hour: count}。
+    返回的 hour 是 0-23 的整数。
+    """
+    uid = str(user_id)
+    
+    def _sync() -> dict[int, int]:
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT hour, count FROM user_active_hours WHERE user_id=?",
+                (uid,),
+            )
+            return {int(h): int(c) for h, c in cur.fetchall()}
+    
+    return await asyncio.to_thread(_sync)
+
+
+def get_user_active_hours_sync(user_id: str) -> dict[int, int]:
+    """同步版本的 get_user_active_hours。"""
+    uid = str(user_id)
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT hour, count FROM user_active_hours WHERE user_id=?",
+            (uid,),
+        )
+        return {int(h): int(c) for h, c in cur.fetchall()}
+

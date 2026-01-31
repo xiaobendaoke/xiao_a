@@ -141,10 +141,58 @@ async def fetch_github_trending() -> list[InfoItem]:
         return []
 
 
+async def _fetch_direct_rss(url: str) -> list[InfoItem]:
+    """从直接 RSS 源拉取"""
+    timeout = httpx.Timeout(10.0, connect=5.0)
+    
+    # 根据 URL 推断分类
+    category = "tech"  # 默认
+    if any(kw in url.lower() for kw in ["finance", "ft", "wallstreet", "36kr", "huxiu"]):
+        category = "finance"
+    elif any(kw in url.lower() for kw in ["bbc", "reuters", "nytimes"]):
+        category = "world"
+    
+    try:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            resp = await client.get(url, headers={"User-Agent": _UA, "Accept": "application/rss+xml,application/xml,*/*"})
+            if resp.status_code >= 400:
+                logger.warning(f"[info_agent] direct rss failed {url}: status={resp.status_code}")
+                return []
+            
+            text = resp.text or ""
+            items = _parse_rss_items(text, category)
+            logger.debug(f"[info_agent] fetched {len(items)} items from {url}")
+            return items
+    except Exception as e:
+        logger.warning(f"[info_agent] direct rss failed {url}: {e}")
+        return []
+
+
+async def fetch_direct_rss_feeds() -> list[InfoItem]:
+    """并发拉取所有直接 RSS 源（作为 RSSHub 的备选）"""
+    feeds = config.DIRECT_RSS_FEEDS
+    if not feeds:
+        return []
+    
+    tasks = [_fetch_direct_rss(url) for url in feeds]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    items: list[InfoItem] = []
+    for r in results:
+        if isinstance(r, Exception):
+            logger.warning(f"[info_agent] direct rss exception: {r}")
+            continue
+        items.extend(r or [])
+    
+    logger.info(f"[info_agent] fetched total {len(items)} items from direct RSS")
+    return items
+
+
 async def fetch_all_sources() -> list[InfoItem]:
     """拉取所有信息源"""
     results = await asyncio.gather(
         fetch_all_rsshub_feeds(),
+        fetch_direct_rss_feeds(),  # 添加直接 RSS 源
         fetch_github_trending(),
         return_exceptions=True,
     )
@@ -157,3 +205,4 @@ async def fetch_all_sources() -> list[InfoItem]:
         items.extend(r or [])
     
     return items
+

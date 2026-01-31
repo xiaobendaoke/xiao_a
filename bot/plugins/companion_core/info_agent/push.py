@@ -59,11 +59,37 @@ def in_quiet_hours(now: datetime | None = None) -> bool:
         return quiet_start <= t < quiet_end
 
 
-def in_preferred_hours(now: datetime | None = None) -> bool:
-    """检查是否在优先推送时段"""
+def in_preferred_hours(now: datetime | None = None, user_id: str | None = None) -> bool:
+    """
+    检查是否在推送优先时段（智能学习用户活跃时间）。
+    
+    逻辑：
+    1. 如果有用户活跃小时数据，检查当前小时是否是用户的活跃时段
+    2. 如果没有足够数据（新用户），使用兜底配置
+    """
+    from ..db import get_user_active_hours_sync
+    
     now = now or datetime.now()
-    current_hour = str(now.hour)
-    return current_hour in config.INFO_AGENT_PUSH_HOURS
+    current_hour = now.hour
+    
+    # 没有指定用户：使用兜底配置
+    if not user_id:
+        return str(current_hour) in config.INFO_AGENT_FALLBACK_PUSH_HOURS
+    
+    # 获取用户活跃小时数据
+    active_hours = get_user_active_hours_sync(str(user_id))
+    
+    # 数据不足（少于 20 条记录）：使用兜底配置
+    total_count = sum(active_hours.values())
+    if total_count < 20:
+        return str(current_hour) in config.INFO_AGENT_FALLBACK_PUSH_HOURS
+    
+    # 计算当前小时的活跃度占比
+    current_count = active_hours.get(current_hour, 0)
+    ratio = current_count / total_count if total_count > 0 else 0
+    
+    # 超过阈值则认为是活跃时段
+    return ratio >= config.INFO_AGENT_ACTIVE_HOUR_THRESHOLD
 
 
 def pick_bot():
