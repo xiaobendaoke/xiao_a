@@ -29,7 +29,7 @@ from .llm_core import get_ai_reply
 from .llm_news import consume_search_sources
 from .db import touch_active, save_profile_item, log_user_active_hour
 from .utils.world_info import get_time_description, get_time_period
-from .utils.typing_speed import typing_delay_seconds
+from .send_rhythm import bubble_delay_seconds, typing_delay_seconds
 from .llm_vision import extract_images_and_text, generate_image_reply
 from .memory import add_memory
 from .mood import mood_manager
@@ -46,6 +46,8 @@ from .voice.io import fetch_record_from_event
 from .voice.tts import synthesize_record_base64
 from .memo import try_handle_memo
 from .scheduler_custom import try_handle_schedule
+from .bubble_splitter import bubble_parts as _bubble_parts
+from .llm_bubbles import parse_bubble_tag, strip_bubble_tag
 
 
 RATE_LIMIT_SECONDS = 1.2
@@ -195,108 +197,6 @@ def _looks_like_voice_reply_request(text: str) -> bool:
     return any(x in t for x in triggers)
 
 
-def _bubble_parts(text: str) -> list[str]:
-    """把要发送的文本拆成“气泡段落”，模拟真人分段发送（增强版）。
-
-    目标：
-    - 避免最后一个气泡异常超长（影响阅读与逻辑感）
-    - 总气泡数上限固定（默认 6）
-    """
-    s = str(text or "").strip()
-    if not s:
-        return []
-
-    max_bubbles = 6
-    max_chars = 38  # 单个气泡尽量别太长（中文约 1 字=1 字符）
-    overflow_suffix = "……先不刷屏啦"
-
-    def _split_by_punct(t: str, punct: str) -> list[str]:
-        buf = ""
-        out: list[str] = []
-        for ch in t:
-            buf += ch
-            if ch in punct:
-                if buf.strip():
-                    out.append(buf.strip())
-                buf = ""
-        if buf.strip():
-            out.append(buf.strip())
-        return out
-
-    def _hard_chunk(t: str, n: int) -> list[str]:
-        t = (t or "").strip()
-        if not t:
-            return []
-        return [t[i:i + n].strip() for i in range(0, len(t), n) if t[i:i + n].strip()]
-
-    def _split_plain_text(t: str) -> list[str]:
-        raw_lines = [p.strip() for p in (t or "").splitlines() if p.strip()]
-        out: list[str] = []
-        for line in raw_lines:
-            # 先按句末标点切
-            chunks = _split_by_punct(line, "。！？!?；;")
-            if not chunks:
-                chunks = [line]
-            for c in chunks:
-                if len(c) <= max_chars:
-                    out.append(c)
-                    continue
-                # 再按逗号/顿号等“弱断句”切一次
-                sub_chunks = _split_by_punct(c, "，,、：:")
-                if len(sub_chunks) <= 1:
-                    out.extend(_hard_chunk(c, max_chars))
-                else:
-                    for sc in sub_chunks:
-                        if len(sc) <= max_chars:
-                            out.append(sc)
-                        else:
-                            out.extend(_hard_chunk(sc, max_chars))
-        return [x for x in out if x.strip()]
-
-    # 保护代码块：避免把 ``` ``` 内部拆碎
-    code_re = re.compile(r"```.*?```", re.S)
-    candidates: list[str] = []
-    last = 0
-    for m in code_re.finditer(s):
-        before = s[last:m.start()]
-        candidates.extend(_split_plain_text(before))
-        block = (m.group(0) or "").strip()
-        if block:
-            candidates.append(block)
-        last = m.end()
-    candidates.extend(_split_plain_text(s[last:]))
-
-    # 打包成气泡
-    bubbles: list[str] = []
-    current = ""
-    for piece in [c for c in candidates if c.strip()]:
-        if not current:
-            current = piece
-            continue
-        joiner = "\n" if ("```" in current or "```" in piece) else "\n"
-        if len(current) + len(joiner) + len(piece) <= max_chars:
-            current = f"{current}{joiner}{piece}"
-        else:
-            bubbles.append(current.strip())
-            current = piece
-    if current.strip():
-        bubbles.append(current.strip())
-
-    # 限制气泡数量：保留前 max_bubbles-1；尾部做“短截断”，避免最后一个变超长
-    if len(bubbles) > max_bubbles:
-        head = bubbles[: max_bubbles - 1]
-        tail = " ".join(bubbles[max_bubbles - 1 :]).strip()
-        if tail:
-            allow = max(0, max_chars - len(overflow_suffix))
-            if allow and len(tail) > allow:
-                tail = tail[:allow].rstrip() + overflow_suffix
-            head.append(tail)
-        else:
-            head.append(overflow_suffix)
-        bubbles = head
-
-    return [p for p in bubbles if p.strip()]
-
 
 def _maybe_learn_city_from_user_text(user_id: int, user_input: str) -> None:
     """从用户发言里尝试“记住所在地城市”，用于后续天气查询与早晨提醒。"""
@@ -325,22 +225,44 @@ def _maybe_learn_city_from_user_text(user_id: int, user_input: str) -> None:
 
 
 async def _send_bubbles_and_finish(text: str, *, user_id: int | None = None) -> None:
-    """按气泡分段发送，并在最后一段 `finish()` 结束当前会话。"""
-    parts = _bubble_parts(text)
+    """按气泡分段发送，并在最后一段 `finish()` 结束当前会话。
+    
+    特性：
+    - 优先使用 LLM 输出的语义级气泡边界（如果启用且有效）
+    - 否则用 bubble_splitter 自动分割
+    - 每条间隔增加随机抖动（250~900ms）
+    - 长内容（超过 4 条）中间额外停顿 1.5~2s
+    """
+    # 尝试从 LLM 输出解析气泡标签
+    parts = parse_bubble_tag(text)
+    if parts:
+        # 使用语义级分割，移除标签后的文本不再需要
+        pass
+    else:
+        # 回退到自动分割（先移除可能残留的标签）
+        clean_text = strip_bubble_tag(text)
+        parts = _bubble_parts(clean_text)
+    
     if not parts:
         msg = "唔…我刚刚走神了一下，你再说一遍嘛。"
         await asyncio.sleep(typing_delay_seconds(msg, user_id=user_id))
         await chat_handler.finish(msg)
 
-    for p in parts[:-1]:
+    total = len(parts)
+    for i, p in enumerate(parts[:-1]):
         if user_id is not None:
             await _wait_if_user_typing(user_id)
-        await asyncio.sleep(typing_delay_seconds(p, user_id=user_id))
+        delay = bubble_delay_seconds(p, user_id=user_id, bubble_index=i, total_bubbles=total)
+        await asyncio.sleep(delay)
         await chat_handler.send(p)
+    
+    # 最后一条
     last = parts[-1]
+    last_idx = total - 1
     if user_id is not None:
         await _wait_if_user_typing(user_id)
-    await asyncio.sleep(typing_delay_seconds(last, user_id=user_id))
+    delay = bubble_delay_seconds(last, user_id=user_id, bubble_index=last_idx, total_bubbles=total)
+    await asyncio.sleep(delay)
     await chat_handler.finish(last)
 
 
@@ -367,15 +289,30 @@ def _cancel_pending_image_task(user_id: int) -> None:
 
 
 async def _send_private_bubbles(user_id: int, text: str) -> None:
-    """在后台任务里私聊发送（不依赖 matcher 上下文）。"""
+    """在后台任务里私聊发送（不依赖 matcher 上下文）。
+    
+    特性：
+    - 优先使用 LLM 输出的语义级气泡边界（如果启用且有效）
+    - 否则用 bubble_splitter 自动分割
+    - 每条间隔增加随机抖动（250~900ms）
+    - 长内容（超过 4 条）中间额外停顿 1.5~2s
+    """
     bot = get_bot()
-    parts = _bubble_parts(text)
+    
+    # 尝试从 LLM 输出解析气泡标签
+    parts = parse_bubble_tag(text)
+    if not parts:
+        clean_text = strip_bubble_tag(text)
+        parts = _bubble_parts(clean_text)
+    
     if not parts:
         return
 
-    for p in parts:
+    total = len(parts)
+    for i, p in enumerate(parts):
         await _wait_if_user_typing(user_id)
-        await asyncio.sleep(typing_delay_seconds(p, user_id=user_id))
+        delay = bubble_delay_seconds(p, user_id=user_id, bubble_index=i, total_bubbles=total)
+        await asyncio.sleep(delay)
         await bot.send_private_msg(user_id=user_id, message=p)
 
 
