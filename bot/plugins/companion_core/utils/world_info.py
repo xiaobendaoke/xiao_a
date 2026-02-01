@@ -59,10 +59,15 @@ def _extract_user_city(profile: dict) -> str:
 def _extract_city_from_text(user_text: str) -> str:
     """从用户文本里尝试提取“目标城市”（只在天气问句里启用的轻量启发式）。"""
     t = (user_text or "").strip()
-    if not t or "天气" not in t:
+    if not t:
         return ""
 
     import re
+
+    # 只有在“天气相关”语境里才尝试抽城市名（避免普通闲聊误伤）
+    weather_triggers = ("天气", "温度", "气温", "下雨", "降雨", "雨吗", "要带伞", "穿什么", "冷不冷", "热不热")
+    if not any(x in t for x in weather_triggers):
+        return ""
 
     # 这类问法通常是在问“你能不能看到我所在地的天气”，并没有给出城市名
     if re.search(r"(我在的城市|我所在的城市|我这边的城市|我这的城市|我在的地方|我所在的地方|我这边的地方)", t):
@@ -87,8 +92,13 @@ def _extract_city_from_text(user_text: str) -> str:
     return ""
 
 
-async def get_world_prompt(user_id: Optional[str] = None, user_text: Optional[str] = None) -> str:
-    """生成提供给 LLM 的现实上下文提示词（时间/地点/天气）。"""
+async def get_world_prompt(
+    user_id: Optional[str] = None,
+    user_text: Optional[str] = None,
+    *,
+    include_weather: bool = False,
+) -> str:
+    """生成提供给 LLM 的现实上下文提示词（时间/地点/（可选）天气）。"""
     now = datetime.now()
     time_desc = get_time_description(now)
     period = get_time_period(now)
@@ -101,46 +111,45 @@ async def get_world_prompt(user_id: Optional[str] = None, user_text: Optional[st
         except Exception as e:
             logger.warning(f"[world_info] get profile failed user_id={user_id!r}: {e}")
 
-    query_city = _extract_city_from_text(user_text or "")
-    city_for_weather = query_city or user_city
-
     weather_text = "（暂时不可用）"
     available = False
-    if city_for_weather:
-        try:
-            loc = await geocode_city(city_for_weather)
-            if loc:
-                forecast = await fetch_forecast(loc)
-                w = summarize_today_weather(loc, forecast)
-                available = True
-                parts: list[str] = [f"城市：{w.get('city')}", f"今日：{w.get('today_weather_text')}"]
-                tmax, tmin = w.get("today_temp_max"), w.get("today_temp_min")
-                if tmax is not None or tmin is not None:
-                    parts.append(f"温度：{tmin} ~ {tmax}°C")
-                if w.get("today_precip_prob_max") is not None:
-                    parts.append(f"降水概率：最高约 {w.get('today_precip_prob_max')}%")
-                if w.get("current_temp") is not None:
-                    parts.append(f"当前：{w.get('current_temp')}°C（体感{w.get('current_feels_like')}°C）")
-                if w.get("current_wind_speed") is not None:
-                    parts.append(f"风速：{w.get('current_wind_speed')} m/s")
-                weather_text = "；".join([p for p in parts if p and "None" not in p])
-            else:
-                logger.warning(
-                    f"[world_info] open-meteo geocode empty city={city_for_weather!r} "
-                    f"proxy={get_open_meteo_proxy()!r}"
-                )
-        except Exception as e:
-            logger.warning(f"[world_info] open-meteo failed city={city_for_weather!r}: {e!r}")
+    if include_weather:
+        query_city = _extract_city_from_text(user_text or "")
+        city_for_weather = query_city or user_city
+        if city_for_weather:
+            try:
+                loc = await geocode_city(city_for_weather)
+                if loc:
+                    forecast = await fetch_forecast(loc)
+                    w = summarize_today_weather(loc, forecast)
+                    available = True
+                    parts: list[str] = [f"城市：{w.get('city')}", f"今日：{w.get('today_weather_text')}"]
+                    tmax, tmin = w.get("today_temp_max"), w.get("today_temp_min")
+                    if tmax is not None or tmin is not None:
+                        parts.append(f"温度：{tmin} ~ {tmax}°C")
+                    if w.get("today_precip_prob_max") is not None:
+                        parts.append(f"降水概率：最高约 {w.get('today_precip_prob_max')}%")
+                    if w.get("current_temp") is not None:
+                        parts.append(f"当前：{w.get('current_temp')}°C（体感{w.get('current_feels_like')}°C）")
+                    if w.get("current_wind_speed") is not None:
+                        parts.append(f"风速：{w.get('current_wind_speed')} m/s")
+                    weather_text = "；".join([p for p in parts if p and "None" not in p])
+                else:
+                    logger.warning(
+                        f"[world_info] open-meteo geocode empty city={city_for_weather!r} "
+                        f"proxy={get_open_meteo_proxy()!r}"
+                    )
+            except Exception as e:
+                logger.warning(f"[world_info] open-meteo failed city={city_for_weather!r}: {e!r}")
 
     return (
         "【现实环境感知】\n"
         f"- 时间：{time_desc}\n"
         f"- 当前时段：{period}\n"
         f"- 你的所在地：{user_city or '未知'}\n"
-        f"- 当地天气：{weather_text}\n"
-        f"- 天气可用性：{'可用' if available else '不可用'}\n"
-        "【使用要求】把时间/天气自然融入关心或提醒；用户明确问到天气/时间时可以直接回答。\n"
-        "【地点提示】当所在地=未知时，可以温柔问一句“你现在在哪个城市呀”，并在用户回答后记到画像“所在城市”。\n"
-        "【重要】当天气可用性=不可用：请坦诚说明你现在拿不到可靠天气信息，别编造实时天气。\n"
-        "【重要】当用户问“你知不知道我在哪/我这是哪”：如果所在地不为未知，可以直接说出你记得的城市；否则请询问城市并建议你会记住。\n"
+        + (f"- 当地天气：{weather_text}\n" f"- 天气可用性：{'可用' if available else '不可用'}\n" if include_weather else "")
+        + "【使用要求】用时间/时段营造真实感就行；除非用户问到天气/穿衣/带伞/出行，否则不要主动报具体温度或下雨概率。\n"
+        + "【地点提示】只有在用户问天气/位置，或需要地点相关建议时，才追问城市；平时别频繁问“你在哪”。\n"
+        + "【重要】当用户问到天气但拿不到可靠信息时，坦诚说明“现在没法获取实时天气”，不要猜。\n"
+        + "【重要】当用户问“你知不知道我在哪/我这是哪”：如果所在地不为未知，可以直接说出你记得的城市；否则请询问城市并建议你会记住。\n"
     )

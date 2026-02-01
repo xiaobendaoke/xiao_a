@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+import os
+
 from nonebot import logger
 from .persona import SYSTEM_PROMPT
 from .mood import mood_manager, clamp
@@ -37,6 +39,33 @@ from .skills.executor import execute_skill_data, build_skill_prompt
 # 兼容旧引用（llm_web/llm_proactive 可能还没改时）
 _get_client = get_client
 _load_llm_settings = load_llm_settings
+
+
+def _env_int(name: str, default: int) -> int:
+    v = (os.getenv(name) or "").strip()
+    if not v:
+        return default
+    try:
+        return int(float(v))
+    except Exception:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    v = (os.getenv(name) or "").strip()
+    if not v:
+        return default
+    try:
+        return float(v)
+    except Exception:
+        return default
+
+
+# 默认聊天偏短、偏稳；可用环境变量覆盖
+CHAT_MAX_TOKENS = _env_int("XIAOA_CHAT_MAX_TOKENS", 240)
+CHAT_MAX_TOKENS_SKILL = _env_int("XIAOA_CHAT_MAX_TOKENS_SKILL", 420)
+CHAT_TEMPERATURE = _env_float("XIAOA_CHAT_TEMPERATURE", 0.6)
+VOICE_MAX_TOKENS = _env_int("XIAOA_VOICE_MAX_TOKENS", 180)
 
 
 def _is_weather_query(user_text: str) -> bool:
@@ -71,7 +100,8 @@ async def get_ai_reply(user_id: str, user_text: str, *, voice_mode: bool = False
             skill_data = await execute_skill_data(skill_name)
             skill_prompt = build_skill_prompt(skill_name, skill_data)
 
-        world_context = await get_world_prompt(user_id, user_text=user_text)
+        include_weather = _is_weather_query(user_text)
+        world_context = await get_world_prompt(user_id, user_text=user_text, include_weather=include_weather)
         web_search_context, web_sources = await maybe_get_web_search_context(user_text)
         current_mood = mood_manager.get_user_mood(user_id)
         current_mood_desc = f"{mood_manager.get_mood_desc(user_id)}（心情值:{current_mood}）"
@@ -98,7 +128,7 @@ async def get_ai_reply(user_id: str, user_text: str, *, voice_mode: bool = False
             messages.append({"role": "system", "content": VOICE_REPLY_SYSTEM})
         if is_news_query:
             messages.append({"role": "system", "content": NEWS_ANSWER_SYSTEM})
-        if _is_weather_query(user_text):
+        if include_weather:
             messages.append({"role": "system", "content": WEATHER_QA_SYSTEM})
         # ✅ 注入 skill 专业能力 prompt
         if skill_prompt:
@@ -111,10 +141,15 @@ async def get_ai_reply(user_id: str, user_text: str, *, voice_mode: bool = False
                     f"{context_prefix}"
                     f"【当前心情】：{current_mood_desc}\n"
                     f"【你记得的用户信息】：\n{profile_str}\n"
+                    f"【画像使用规则】：只有当用户这句话确实用得上时才引用其中某一条；不要把画像当清单复述；"
+                    f"不要无中生有提旧事（例如比赛/作品/简历等），除非用户主动提到或明确求助。\n"
                     f"【记忆指令】：当用户明确提供长期稳定信息时，回复末尾另起一行输出 "
                     f"[UPDATE_PROFILE:键=值]（可多条）。每次回复末尾另起一行输出 [MOOD_CHANGE:x]。\n"
                     f"【格式要求】：以上标签必须单独占一行，且放在消息最后，不要和正文写在同一行。\n"
-                    f"【现实感知要求】：如果现实环境感知里“天气可用性=不可用”，请坦诚说明拿不到实时天气，不要猜。\n"
+                    f"【天气规则】：只有当用户问到天气/穿衣/带伞/冷不冷/热不热时，才引用【现实环境感知】里的天气字段；"
+                    f"如果天气可用性=不可用或未提供天气字段，就说拿不到可靠天气信息，别编造。\n"
+                    f"【跑题约束】：只围绕用户当前这句话回应；不要突然开启新话题（例如改简历/找工作计划/项目复盘等）。\n"
+                    f"【长度约束】：正文尽量 1-6 行、短句；禁止编号列表（1. 2. 3.）和长段落。\n"
                     f"【现实感知要求】：现实环境感知里给了“时间/时段”，不要把白天说成凌晨/深夜。"
                 ),
             }
@@ -131,7 +166,8 @@ async def get_ai_reply(user_id: str, user_text: str, *, voice_mode: bool = False
         response = await client.chat.completions.create(
             model=model,
             messages=messages,
-            temperature=0.75,          # 调高一点，增加情感表达变化”
+            temperature=CHAT_TEMPERATURE,
+            max_tokens=(VOICE_MAX_TOKENS if voice_mode else (CHAT_MAX_TOKENS_SKILL if skill_prompt else CHAT_MAX_TOKENS)),
             # frequency_penalty=0.2,   # 如果你的网关支持，可打开：减少复读/口癖
             timeout=30.0
         )

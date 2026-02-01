@@ -196,65 +196,106 @@ def _looks_like_voice_reply_request(text: str) -> bool:
 
 
 def _bubble_parts(text: str) -> list[str]:
-    """把要发送的文本拆成“气泡段落”，模拟真人分段发送（增强版）。"""
+    """把要发送的文本拆成“气泡段落”，模拟真人分段发送（增强版）。
+
+    目标：
+    - 避免最后一个气泡异常超长（影响阅读与逻辑感）
+    - 总气泡数上限固定（默认 6）
+    """
     s = str(text or "").strip()
     if not s:
         return []
 
-    # 1. 先按换行符拆
-    raw_lines = [p.strip() for p in s.splitlines() if p.strip()]
-    
-    parts = []
-    for line in raw_lines:
-        # 如果单行过长（>25字），尝试进一步拆分
-        if len(line) > 25:
-            # 2. 按句末标点拆（。！？!?）
-            # split by (punctuations + optional spaces)
-            # keep the punctuation with the preceding sentence
-            subs = re.split(r"([。！？!?])\s*", line)
-            # re.split with modifying group returns [part1, sep1, part2, sep2...]
-            # We need to recombine them: "Hello!" -> ["Hello", "!", ""]
-            
-            recombined = []
-            current = ""
-            for x in subs:
-                x = x.strip()
-                if not x: 
-                    continue
-                if x in "。！？!?":
-                    current += x
-                    recombined.append(current)
-                    current = ""
-                else:
-                    if current: # 处理像 "A。B" 这种没空格的情况
-                        recombined.append(current)
-                    current = x
-            if current:
-                recombined.append(current)
-            
-            # 3. 如果还是有长句（>25字），且中间有空格，按空格拆（针对“微信空格流”打字习惯）
-            final_subs = []
-            for sub in recombined:
-                if len(sub) > 25 and " " in sub:
-                     # 只有当空格确实把句子分成了较长的两部分时才拆
-                     # 避免把 "Hello World" 这种短语拆了
-                    spaced = [sp.strip() for sp in sub.split(" ") if sp.strip()]
-                    final_subs.extend(spaced)
-                else:
-                    final_subs.append(sub)
-            
-            parts.extend(final_subs)
-        else:
-            parts.append(line)
+    max_bubbles = 6
+    max_chars = 38  # 单个气泡尽量别太长（中文约 1 字=1 字符）
+    overflow_suffix = "……先不刷屏啦"
 
-    # 4. 合并过短的碎片（可选，避免切太碎），这里暂不合并，保持节奏感
-    
-    # 限制气泡数量，避免刷屏太严重
-    if len(parts) > 5:
-        # 保留前4个，剩下的合并
-        parts = parts[:4] + [" ".join(parts[4:])]
-        
-    return [p for p in parts if p.strip()]
+    def _split_by_punct(t: str, punct: str) -> list[str]:
+        buf = ""
+        out: list[str] = []
+        for ch in t:
+            buf += ch
+            if ch in punct:
+                if buf.strip():
+                    out.append(buf.strip())
+                buf = ""
+        if buf.strip():
+            out.append(buf.strip())
+        return out
+
+    def _hard_chunk(t: str, n: int) -> list[str]:
+        t = (t or "").strip()
+        if not t:
+            return []
+        return [t[i:i + n].strip() for i in range(0, len(t), n) if t[i:i + n].strip()]
+
+    def _split_plain_text(t: str) -> list[str]:
+        raw_lines = [p.strip() for p in (t or "").splitlines() if p.strip()]
+        out: list[str] = []
+        for line in raw_lines:
+            # 先按句末标点切
+            chunks = _split_by_punct(line, "。！？!?；;")
+            if not chunks:
+                chunks = [line]
+            for c in chunks:
+                if len(c) <= max_chars:
+                    out.append(c)
+                    continue
+                # 再按逗号/顿号等“弱断句”切一次
+                sub_chunks = _split_by_punct(c, "，,、：:")
+                if len(sub_chunks) <= 1:
+                    out.extend(_hard_chunk(c, max_chars))
+                else:
+                    for sc in sub_chunks:
+                        if len(sc) <= max_chars:
+                            out.append(sc)
+                        else:
+                            out.extend(_hard_chunk(sc, max_chars))
+        return [x for x in out if x.strip()]
+
+    # 保护代码块：避免把 ``` ``` 内部拆碎
+    code_re = re.compile(r"```.*?```", re.S)
+    candidates: list[str] = []
+    last = 0
+    for m in code_re.finditer(s):
+        before = s[last:m.start()]
+        candidates.extend(_split_plain_text(before))
+        block = (m.group(0) or "").strip()
+        if block:
+            candidates.append(block)
+        last = m.end()
+    candidates.extend(_split_plain_text(s[last:]))
+
+    # 打包成气泡
+    bubbles: list[str] = []
+    current = ""
+    for piece in [c for c in candidates if c.strip()]:
+        if not current:
+            current = piece
+            continue
+        joiner = "\n" if ("```" in current or "```" in piece) else "\n"
+        if len(current) + len(joiner) + len(piece) <= max_chars:
+            current = f"{current}{joiner}{piece}"
+        else:
+            bubbles.append(current.strip())
+            current = piece
+    if current.strip():
+        bubbles.append(current.strip())
+
+    # 限制气泡数量：保留前 max_bubbles-1；尾部做“短截断”，避免最后一个变超长
+    if len(bubbles) > max_bubbles:
+        head = bubbles[: max_bubbles - 1]
+        tail = " ".join(bubbles[max_bubbles - 1 :]).strip()
+        if tail:
+            allow = max(0, max_chars - len(overflow_suffix))
+            if allow and len(tail) > allow:
+                tail = tail[:allow].rstrip() + overflow_suffix
+            head.append(tail)
+        else:
+            head.append(overflow_suffix)
+        bubbles = head
+
+    return [p for p in bubbles if p.strip()]
 
 
 def _maybe_learn_city_from_user_text(user_id: int, user_input: str) -> None:
@@ -331,8 +372,6 @@ async def _send_private_bubbles(user_id: int, text: str) -> None:
     parts = _bubble_parts(text)
     if not parts:
         return
-    if len(parts) > 4:
-        parts = parts[:3] + [" ".join(parts[3:])]
 
     for p in parts:
         await _wait_if_user_typing(user_id)
