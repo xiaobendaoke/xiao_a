@@ -8,6 +8,7 @@ import re
 from datetime import datetime
 from .db import add_memo, search_memos, delete_memo
 from .memory import add_memory as add_chat_memory
+from .llm_core import get_system_reply
 
 def _strip_prefix(text: str, prefixes: tuple[str, ...]) -> str | None:
     for p in prefixes:
@@ -35,7 +36,7 @@ async def try_handle_memo(user_id: str, user_input: str) -> str | None:
 
     if save_content is not None:
         if not save_content:
-            return "你要我帮你记什么呀？\n比如：记一下明天要买牛奶"
+            return await get_system_reply(user_id, "用户说要记笔记，但是没说内容。请问他要记什么。")
         
         # 简单提取标签：如果内容里有 #tag
         tags = []
@@ -48,9 +49,10 @@ async def try_handle_memo(user_id: str, user_input: str) -> str | None:
         add_memo(user_id, save_content, tags=",".join(tags))
         
         # 记录到对话记忆，保持上下文连贯
+        reply = await get_system_reply(user_id, f"已成功保存备忘录：{save_content}")
         add_chat_memory(user_id, "user", text)
-        add_chat_memory(user_id, "assistant", "好哒，记下来了！")
-        return "好哒，记下来了！"
+        add_chat_memory(user_id, "assistant", reply)
+        return reply
 
     # 2. 查询指令
     # 触发词：查询笔记、搜索笔记、找一下笔记、查备忘、找备忘
@@ -72,9 +74,9 @@ async def try_handle_memo(user_id: str, user_input: str) -> str | None:
         results = search_memos(user_id, search_kw)
         if not results:
             if search_kw:
-                return f"我翻了一下小本本，没找到关于“{search_kw}”的记录呢。"
+                return await get_system_reply(user_id, f"用户搜备忘录关键字“{search_kw}”，但是没找到。")
             else:
-                return "你的备忘录是空的哦。"
+                return await get_system_reply(user_id, "用户想看备忘录，但是列表是空的。")
         
         lines = [f"找到 {len(results)} 条记录：" if search_kw else "最近的记录："]
         for item in results:
@@ -85,7 +87,10 @@ async def try_handle_memo(user_id: str, user_input: str) -> str | None:
                 content = content[:29] + "…"
             lines.append(f"- [{dt}] {content}")
         
-        reply = "\n".join(lines)
+        raw_text = "\n".join(lines)
+        instruction = f"用户查询备忘录，找到了以下内容，请展示给用户（不要随意删减条目）：\n{raw_text}"
+        reply = await get_system_reply(user_id, instruction)
+        
         add_chat_memory(user_id, "user", text)
         add_chat_memory(user_id, "assistant", reply)
         return reply

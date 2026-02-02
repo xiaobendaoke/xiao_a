@@ -9,14 +9,12 @@ import asyncio
 from datetime import datetime, date, time
 from typing import Any
 
-import re
 from nonebot import get_bots, logger
 
 from ..db import get_idle_user_states, touch_active
 from ..memory import add_memory
-from ..db import get_idle_user_states, touch_active
-from ..memory import add_memory
 from ..utils.typing_speed import typing_delay_seconds
+from ..bubble_splitter import bubble_parts as _bubble_parts
 from ..llm_tags import extract_tags_and_clean
 
 from . import config
@@ -24,58 +22,7 @@ from .models import InfoItem
 from . import pool
 
 
-def _bubble_parts(text: str) -> list[str]:
-    """把要发送的文本拆成“气泡段落”，模拟真人分段发送（增强版）。"""
-    s = str(text or "").strip()
-    if not s:
-        return []
-
-    # 1. 先按换行符拆
-    raw_lines = [p.strip() for p in s.splitlines() if p.strip()]
-    
-    parts = []
-    for line in raw_lines:
-        # 如果单行过长（>25字），尝试进一步拆分
-        if len(line) > 25:
-            # 2. 按句末标点拆（。！？!?）
-            subs = re.split(r"([。！？!?])\s*", line)
-            
-            recombined = []
-            current = ""
-            for x in subs:
-                x = x.strip()
-                if not x: 
-                    continue
-                if x in "。！？!?":
-                    current += x
-                    recombined.append(current)
-                    current = ""
-                else:
-                    if current:
-                        recombined.append(current)
-                    current = x
-            if current:
-                recombined.append(current)
-            
-            # 3. 如果还是有长句（>25字），且中间有空格，按空格拆
-            final_subs = []
-            for sub in recombined:
-                if len(sub) > 25 and " " in sub:
-                     # 只有当空格确实把句子分成了较长的两部分时才拆
-                    spaced = [sp.strip() for sp in sub.split(" ") if sp.strip()]
-                    final_subs.extend(spaced)
-                else:
-                    final_subs.append(sub)
-            
-            parts.extend(final_subs)
-        else:
-            parts.append(line)
-
-    # 限制气泡数量
-    if len(parts) > 6:
-        parts = parts[:5] + [" ".join(parts[5:])]
-        
-    return [p for p in parts if p.strip()]
+# _bubble_parts 已移至 bubble_splitter.py 统一管理（通过导入使用）
 
 
 # 每日推送计数（user_id -> {date: count}）
@@ -242,13 +189,14 @@ async def push_messages(
             for part in parts:
                 await asyncio.sleep(typing_delay_seconds(part, user_id=user_id))
                 await bot.call_api("send_private_msg", user_id=uid, message=part)
-                add_memory(str(user_id), "assistant", text)
-                
-                if item_id:
-                    pool.mark_pushed(item_id, user_id)
-                
-                increment_daily_push_count(user_id)
-                success += 1
+            
+            # 记忆和计数放在消息发送完成后（每条 message 只记一次）
+            add_memory(str(user_id), "assistant", text)
+            if item_id:
+                pool.mark_pushed(item_id, user_id)
+            increment_daily_push_count(user_id)
+            success += 1
+            
         except Exception as e:
             logger.error(f"[info_agent] push message failed {user_id}: {e}")
             break

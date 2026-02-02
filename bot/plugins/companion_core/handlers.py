@@ -29,13 +29,10 @@ from .llm_core import get_ai_reply
 from .llm_news import consume_search_sources
 from .db import touch_active, save_profile_item, log_user_active_hour
 from .utils.world_info import get_time_description, get_time_period
-from .send_rhythm import bubble_delay_seconds, typing_delay_seconds
 from .llm_vision import extract_images_and_text, generate_image_reply
 from .memory import add_memory
 from .mood import mood_manager
 from .stock import parse_stock_id, build_stock_context
-
-# ✅ 新增：URL总结相关
 from .llm_web import should_summarize_url, generate_url_summary, generate_url_confirm
 from .web.parse import extract_urls, parse_readable
 from .web.fetch import fetch_html
@@ -46,15 +43,51 @@ from .voice.io import fetch_record_from_event
 from .voice.tts import synthesize_record_base64
 from .memo import try_handle_memo
 from .scheduler_custom import try_handle_schedule
-from .bubble_splitter import bubble_parts as _bubble_parts
-from .llm_bubbles import parse_bubble_tag, strip_bubble_tag
+from .rag_core import add_document as rag_add_doc
+from .llm_core import get_system_reply
+from .reply_manager import (
+    send_bubbles_and_finish as _send_bubbles_and_finish,
+    send_private_bubbles as _send_private_bubbles,
+    wait_if_user_typing as _wait_if_user_typing,
+    update_typing_status,
+    reply_with_error
+)
+
+
+async def _try_handle_rag_explicit(user_id: int, text: str) -> str | None:
+    """处理显式记忆指令：记住：xxx"""
+    t = (text or "").strip()
+    # 触发词
+    prefixes = ("记住：", "记住:", "请记住：", "请记住:", "RAG存：", "rag存：")
+    content = None
+    for p in prefixes:
+        if t.startswith(p):
+            content = t[len(p):].strip()
+            break
+    
+    if not content:
+        return None
+        
+    if len(content) < 2:
+        return await get_system_reply(user_id, "用户发的“记住”指令内容太短了。请让他多说点。")
+        
+    # 调用 RAG 存储
+    success = await rag_add_doc(content, metadata={
+        "user_id": str(user_id),
+        "source": "explicit_command",
+        "type": "memory"
+    })
+    
+    if success:
+        return await get_system_reply(user_id, "你已成功把这段话刻进长期记忆里了。")
+    else:
+        return await get_system_reply(user_id, "你想记住，但记忆模块出错了，没存进去。")
 
 
 RATE_LIMIT_SECONDS = 1.2
 SOURCE_MAX_AGE_SECONDS = 30 * 60
 PENDING_URL_TTL_SECONDS = 10 * 60
 WEB_CACHE_TTL_HOURS = 12
-TYPING_MAX_WAIT_SECONDS = 60.0
 PENDING_IMAGE_TTL_SECONDS = 60.0
 
 # 避免重复触发（简单锁）
@@ -63,22 +96,9 @@ last_user_call_time: dict[int, float] = {}
 # URL 确认后的“待总结链接”（内存态，进程重启会丢失）
 pending_url_by_user: dict[int, dict[str, Any]] = {}
 
-# 用户输入状态：用于“对方正在输入”时延迟回复
-_typing_events: dict[str, asyncio.Event] = {}
-
 # 图片待处理：允许“先发图，再发问题”
 pending_image_by_user: dict[int, dict[str, Any]] = {}
 pending_image_task_by_user: dict[int, asyncio.Task] = {}
-
-
-def _get_typing_event(user_id: str | int) -> asyncio.Event:
-    uid = str(user_id)
-    ev = _typing_events.get(uid)
-    if ev is None:
-        ev = asyncio.Event()
-        ev.set()
-        _typing_events[uid] = ev
-    return ev
 
 
 typing_notice = on_notice(priority=2, block=False)
@@ -98,22 +118,8 @@ async def handle_typing_notice(event):
     status_text = str(getattr(event, "status_text", "") or "")
     event_type = getattr(event, "event_type", None)
 
-    ev = _get_typing_event(uid)
-    if event_type == 1 or "正在输入" in status_text:
-        ev.clear()
-    elif event_type == 2 or status_text == "":
-        ev.set()
-
-
-async def _wait_if_user_typing(user_id: int) -> None:
-    """若检测到对方正在输入，则等待输入结束或超时再继续。"""
-    ev = _get_typing_event(user_id)
-    if ev.is_set():
-        return
-    try:
-        await asyncio.wait_for(ev.wait(), timeout=TYPING_MAX_WAIT_SECONDS)
-    except asyncio.TimeoutError:
-        ev.set()
+    is_typing = (event_type == 1 or "正在输入" in status_text)
+    update_typing_status(uid, is_typing)
 
 
 def is_private(event: PrivateMessageEvent) -> bool:
@@ -143,6 +149,11 @@ async def probe_any_message(event):
 
 
 chat_handler = on_message(rule=Rule(is_private), priority=5, block=True)
+
+
+async def _send_and_finish(text: str, *, user_id: int | None = None) -> None:
+    """包装函数：隐藏 matcher 参数，简化调用。"""
+    await _send_bubbles_and_finish(chat_handler, text, user_id=user_id)
 
 
 def _looks_like_summary_request(text: str) -> bool:
@@ -224,48 +235,6 @@ def _maybe_learn_city_from_user_text(user_id: int, user_input: str) -> None:
         logger.warning(f"[chat] save city failed uid={user_id}: {e}")
 
 
-async def _send_bubbles_and_finish(text: str, *, user_id: int | None = None) -> None:
-    """按气泡分段发送，并在最后一段 `finish()` 结束当前会话。
-    
-    特性：
-    - 优先使用 LLM 输出的语义级气泡边界（如果启用且有效）
-    - 否则用 bubble_splitter 自动分割
-    - 每条间隔增加随机抖动（250~900ms）
-    - 长内容（超过 4 条）中间额外停顿 1.5~2s
-    """
-    # 尝试从 LLM 输出解析气泡标签
-    parts = parse_bubble_tag(text)
-    if parts:
-        # 使用语义级分割，移除标签后的文本不再需要
-        pass
-    else:
-        # 回退到自动分割（先移除可能残留的标签）
-        clean_text = strip_bubble_tag(text)
-        parts = _bubble_parts(clean_text)
-    
-    if not parts:
-        msg = "唔…我刚刚走神了一下，你再说一遍嘛。"
-        await asyncio.sleep(typing_delay_seconds(msg, user_id=user_id))
-        await chat_handler.finish(msg)
-
-    total = len(parts)
-    for i, p in enumerate(parts[:-1]):
-        if user_id is not None:
-            await _wait_if_user_typing(user_id)
-        delay = bubble_delay_seconds(p, user_id=user_id, bubble_index=i, total_bubbles=total)
-        await asyncio.sleep(delay)
-        await chat_handler.send(p)
-    
-    # 最后一条
-    last = parts[-1]
-    last_idx = total - 1
-    if user_id is not None:
-        await _wait_if_user_typing(user_id)
-    delay = bubble_delay_seconds(last, user_id=user_id, bubble_index=last_idx, total_bubbles=total)
-    await asyncio.sleep(delay)
-    await chat_handler.finish(last)
-
-
 def _format_sources_message(sources: list[dict]) -> str:
     """把搜索来源列表整理成用户可读的多行文本（用于“要链接/出处”场景）。"""
     lines = ["好～我把刚刚那几条的来源链接整理给你："]
@@ -275,10 +244,10 @@ def _format_sources_message(sources: list[dict]) -> str:
         if not href:
             continue
         if title:
-            lines.append(f"- {title}")
-            lines.append(f"  {href}")
+            # 标题和链接放一行，用空格隔开
+            lines.append(f"• {title} {href}")
         else:
-            lines.append(f"- {href}")
+            lines.append(f"• {href}")
     return "\n".join(lines).strip()
 
 
@@ -286,34 +255,6 @@ def _cancel_pending_image_task(user_id: int) -> None:
     task = pending_image_task_by_user.pop(user_id, None)
     if task and not task.done():
         task.cancel()
-
-
-async def _send_private_bubbles(user_id: int, text: str) -> None:
-    """在后台任务里私聊发送（不依赖 matcher 上下文）。
-    
-    特性：
-    - 优先使用 LLM 输出的语义级气泡边界（如果启用且有效）
-    - 否则用 bubble_splitter 自动分割
-    - 每条间隔增加随机抖动（250~900ms）
-    - 长内容（超过 4 条）中间额外停顿 1.5~2s
-    """
-    bot = get_bot()
-    
-    # 尝试从 LLM 输出解析气泡标签
-    parts = parse_bubble_tag(text)
-    if not parts:
-        clean_text = strip_bubble_tag(text)
-        parts = _bubble_parts(clean_text)
-    
-    if not parts:
-        return
-
-    total = len(parts)
-    for i, p in enumerate(parts):
-        await _wait_if_user_typing(user_id)
-        delay = bubble_delay_seconds(p, user_id=user_id, bubble_index=i, total_bubbles=total)
-        await asyncio.sleep(delay)
-        await bot.send_private_msg(user_id=user_id, message=p)
 
 
 async def _image_idle_reply_task(user_id: int, urls: list[str], ts: float) -> None:
@@ -340,7 +281,7 @@ async def _handle_time_request_if_any(user_id: int, user_input: str) -> None:
         return
     now_desc = get_time_description()
     period = get_time_period()
-    await _send_bubbles_and_finish(f"现在是 {now_desc}。\n大概是{period}啦。", user_id=user_id)
+    await _send_and_finish(f"现在是 {now_desc}。\n大概是{period}啦。", user_id=user_id)
 
 
 async def _handle_stock_query_if_any(user_id: int, user_input: str) -> None:
@@ -353,7 +294,7 @@ async def _handle_stock_query_if_any(user_id: int, user_input: str) -> None:
 
     sid = parse_stock_id(t)
     if sid is None:
-        await _send_bubbles_and_finish("你发我一个 6 位股票代码就行啦。\n比如：查股 688110", user_id=user_id)
+        await _send_and_finish("你发我一个 6 位股票代码就行啦。\n比如：查股 688110", user_id=user_id)
 
     ctx = await build_stock_context(sid)
     quote = ctx.get("quote") or {}
@@ -362,7 +303,7 @@ async def _handle_stock_query_if_any(user_id: int, user_input: str) -> None:
 
     # 兜底：行情失败时不走 LLM，直接提示
     if isinstance(quote, dict) and quote.get("error"):
-        await _send_bubbles_and_finish("我刚刚去查了一下。\n但是行情接口这会儿没给到数据。\n你等我一会儿再查一次好不好？", user_id=user_id)
+        await _send_and_finish("我刚刚去查了一下。\n但是行情接口这会儿没给到数据。\n你等我一会儿再查一次好不好？", user_id=user_id)
 
     name = str((quote.get("name") or profile.get("name") or sid.code) or "").strip()
     try:
@@ -408,7 +349,7 @@ async def _handle_stock_query_if_any(user_id: int, user_input: str) -> None:
 
     add_memory(str(user_id), "user", user_input)
     add_memory(str(user_id), "assistant", text)
-    await _send_bubbles_and_finish(text, user_id=user_id)
+    await _send_and_finish(text, user_id=user_id)
 
 
 async def _handle_source_request_if_any(user_id: int, user_input: str) -> None:
@@ -418,7 +359,7 @@ async def _handle_source_request_if_any(user_id: int, user_input: str) -> None:
     sources = consume_search_sources(str(user_id), max_age_seconds=SOURCE_MAX_AGE_SECONDS)
     if not sources:
         return
-    await _send_bubbles_and_finish(_format_sources_message(sources), user_id=user_id)
+    await _send_and_finish(_format_sources_message(sources), user_id=user_id)
 
 
 async def _handle_image_request_if_any(user_id: int, message: Message, user_input: str, now: float) -> bool:
@@ -433,7 +374,7 @@ async def _handle_image_request_if_any(user_id: int, message: Message, user_inpu
             user_mem = user_text.strip() if user_text else "（发送了一张图片）"
             add_memory(str(user_id), "user", user_mem)
             add_memory(str(user_id), "assistant", reply)
-            await _send_bubbles_and_finish(reply, user_id=user_id)
+            await _send_and_finish(reply, user_id=user_id)
             return True
 
         # 只有图片：先缓存，等用户下一条文字追问
@@ -454,7 +395,7 @@ async def _handle_image_request_if_any(user_id: int, message: Message, user_inpu
             reply = await generate_image_reply(str(user_id), list(cached_urls), user_input)
             add_memory(str(user_id), "user", user_input)
             add_memory(str(user_id), "assistant", reply)
-            await _send_bubbles_and_finish(reply, user_id=user_id)
+            await _send_and_finish(reply, user_id=user_id)
             return True
 
     # 超时清理
@@ -513,7 +454,7 @@ async def _handle_summary_followup_if_any(user_id: int, user_input: str, now: fl
     msg = await generate_url_summary(str(user_id), url, title, content)
     text = (msg.get("text") or "").strip()
     if text:
-        await _send_bubbles_and_finish(text, user_id=user_id)
+        await _send_and_finish(text, user_id=user_id)
 
 
 async def _handle_url_auto_if_any(user_id: int, user_input: str, now: float) -> None:
@@ -540,7 +481,7 @@ async def _handle_url_auto_if_any(user_id: int, user_input: str, now: float) -> 
                 "你是想让我帮你整理重点，还是想问里面某个点呀？\n"
                 "想要我总结的话回我一句“总结”就行。"
             )
-        await _send_bubbles_and_finish(text, user_id=user_id)
+        await _send_and_finish(text, user_id=user_id)
 
     # SUMMARIZE（或其它异常值，按总结处理）
     pending_url_by_user.pop(user_id, None)
@@ -548,7 +489,7 @@ async def _handle_url_auto_if_any(user_id: int, user_input: str, now: float) -> 
     msg = await generate_url_summary(str(user_id), url, title, content)
     text = (msg.get("text") or "").strip()
     if text:
-        await _send_bubbles_and_finish(text, user_id=user_id)
+        await _send_and_finish(text, user_id=user_id)
 
 
 group_hint = on_message(rule=to_me(), priority=9, block=False)
@@ -559,8 +500,16 @@ async def handle_group_hint(event):
     """群聊被 @ 时的引导：提示用户转到私聊，避免误以为机器人失效。"""
     if not hasattr(event, "group_id"):
         return
+    uid = getattr(event, "user_id", None)
     msg = "我现在主要在私聊里陪你聊～你私聊我一句就好。"
-    await asyncio.sleep(typing_delay_seconds(msg, user_id=getattr(event, "user_id", None)))
+    if uid:
+        try:
+            msg = await get_system_reply(str(uid), "用户在群里找你。请告诉他你现在只在私聊陪他，让他私聊你。")
+        except:
+            pass
+    
+    # 简单的打字模拟（这里不需要太复杂，因为是群聊）
+    await asyncio.sleep(2.0) 
     await group_hint.finish(msg)
 
 
@@ -607,7 +556,7 @@ async def handle_private_chat(event: PrivateMessageEvent):
                             "\n\n（我这边还没配置语音音色，所以只能先发文字。\n"
                             "请在 bot/.env 里设置：QWEN_TTS_VOICE=你复刻出来的 output.voice，然后重启 nonebot。）"
                         )
-                    await _send_bubbles_and_finish((reply_text or "").strip() + extra, user_id=user_id)
+                    await _send_and_finish((reply_text or "").strip() + extra, user_id=user_id)
             except FinishedException:
                 raise
             except Exception as e:
@@ -654,7 +603,7 @@ async def handle_private_chat(event: PrivateMessageEvent):
         # 6.5) 日程提醒
         schedule_reply = await try_handle_schedule(str(user_id), user_input)
         if schedule_reply:
-            await _send_bubbles_and_finish(schedule_reply, user_id=user_id)
+            await _send_and_finish(schedule_reply, user_id=user_id)
 
         # 7) URL 自动处理：LLM 判断是否要总结/确认
         await _handle_url_auto_if_any(user_id, user_input, now)
@@ -662,7 +611,12 @@ async def handle_private_chat(event: PrivateMessageEvent):
         # 7.2) 智能备忘录
         memo_reply = await try_handle_memo(str(user_id), user_input)
         if memo_reply:
-            await _send_bubbles_and_finish(memo_reply, user_id=user_id)
+            await _send_and_finish(memo_reply, user_id=user_id)
+            
+        # 7.4) RAG 显式记忆
+        rag_reply = await _try_handle_rag_explicit(user_id, user_input)
+        if rag_reply:
+            await _send_and_finish(rag_reply, user_id=user_id)
 
         # 7.5) 股票查询（私聊命令）
         await _handle_stock_query_if_any(user_id, user_input)
@@ -679,15 +633,20 @@ async def handle_private_chat(event: PrivateMessageEvent):
                 raise
             except Exception as e:
                 logger.exception(f"[voice] tts failed(uid={user_id}) on text: {e}")
-                await _send_bubbles_and_finish(reply, user_id=user_id)
+                await _send_and_finish(reply, user_id=user_id)
         else:
-            await _send_bubbles_and_finish(reply, user_id=user_id)
+            await _send_and_finish(reply, user_id=user_id)
 
     except FinishedException:
         raise
     except Exception as e:
         logger.exception(e)
         msg = "我这边刚刚出错了…你再发一次我试试，好不好？"
-        # 这里可能没有 user_id（极少数异常），兜底传 None
-        await asyncio.sleep(typing_delay_seconds(msg, user_id=locals().get("user_id", None)))
-        await chat_handler.finish(msg)
+        uid = locals().get("user_id", None)
+        if uid:
+             try:
+                 msg = await get_system_reply(str(uid), "系统刚刚报错了。请温柔地请求用户再试一次。")
+             except:
+                 pass
+        
+        await reply_with_error(chat_handler, msg, user_id=uid)

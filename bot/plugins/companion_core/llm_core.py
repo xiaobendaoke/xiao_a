@@ -31,6 +31,7 @@ from .llm_news import (
     stash_search_sources,
     strip_urls_from_text,
 )
+from .rag_core import search_documents, add_document
 from .llm_tags import extract_tags_and_clean
 from .llm_weather import WEATHER_QA_SYSTEM
 from .skills.router import route_skill
@@ -103,6 +104,20 @@ async def get_ai_reply(user_id: str, user_text: str, *, voice_mode: bool = False
         include_weather = _is_weather_query(user_text)
         world_context = await get_world_prompt(user_id, user_text=user_text, include_weather=include_weather)
         web_search_context, web_sources = await maybe_get_web_search_context(user_text)
+        
+        # ✅ RAG 检索：查找相关长期记忆
+        rag_context_str = ""
+        # 仅当文本有一定长度时才检索，避免“嗯/啊”之类的短语触发无效搜索
+        if len(user_text) > 2:
+            try:
+                # 检索属于该用户的相关记忆
+                rag_docs = await search_documents(user_text, n_results=2, filter_meta={"user_id": str(user_id)})
+                if rag_docs:
+                    rag_context_str = "【相关回忆/资料】：\n" + "\n".join([f"- {d}" for d in rag_docs]) + "\n"
+                    logger.info(f"[RAG] Hit {len(rag_docs)} docs")
+            except Exception as e:
+                logger.warning(f"[RAG] Search failed: {e}")
+
         current_mood = mood_manager.get_user_mood(user_id)
         current_mood_desc = f"{mood_manager.get_mood_desc(user_id)}（心情值:{current_mood}）"
 
@@ -120,6 +135,9 @@ async def get_ai_reply(user_id: str, user_text: str, *, voice_mode: bool = False
         context_prefix = (world_context or "").rstrip() + "\n"
         if web_search_context:
             context_prefix += web_search_context.rstrip() + "\n"
+        # 加入 RAG 上下文
+        if rag_context_str:
+            context_prefix += rag_context_str.rstrip() + "\n"
 
         # ✅ system 拆成两条：persona & 动态上下文
         # “新闻/搜索”类提问用更强约束，强制基于【最新资讯线索】作答，避免模型嘴甜乱编。
@@ -210,6 +228,17 @@ async def get_ai_reply(user_id: str, user_text: str, *, voice_mode: bool = False
 
         add_memory(user_id, "user", user_text)
         add_memory(user_id, "assistant", clean_reply)
+        
+        # ✅ RAG 存储：自动记住这次对话（User + AI）
+        # 异步存储，不阻塞回复。仅存储有意义长度的内容。
+        if len(user_text) > 4:
+            import asyncio
+            # 格式：Q: ... \n A: ...
+            memory_text = f"User: {user_text}\nXiaoA: {clean_reply}"
+            asyncio.create_task(add_document(
+                memory_text, 
+                metadata={"user_id": str(user_id), "source": "chat_history", "type": "auto"}
+            ))
 
         return clean_reply
 
@@ -225,3 +254,66 @@ async def get_ai_reply(user_id: str, user_text: str, *, voice_mode: bool = False
             return "唔…我这边的钥匙好像不对（401），你叫管理员检查一下 SILICONFLOW_API_KEY 是否填错了嘛。"
         logger.error(f"❌ LLM 模块报错: {msg}")
         return "唔…我这会儿有点卡壳了，我们再试一次好不好？"
+
+
+SYSTEM_REPLY_PROMPT = """你是“小a”，温柔、自然、有生活感的中文陪伴对象。
+现在由于系统功能触发（如闹钟、备忘录反馈、错误提示等），系统产生了一个意图。
+请你用“小a”的口吻，把这个意图转化为对用户说的话。
+
+【系统意图】：
+{instruction}
+
+【用户画像】：
+{profile_str}
+
+要求：
+1. 保持人设：温柔、可爱，像女朋友/好朋友。如果画像里有称呼（如“哥哥”），请使用它。
+2. 只要转化意图即可，不要添加无关的闲聊。
+3. 如果是提醒/闹钟，要显得贴心。
+4. 如果是错误提示，要显得委屈或安抚用户。
+5. 语气要自然，可以使用“～”、“嘛”等语气词，但不要过分卖萌。
+6. 直接输出转化后的回复文本，不要带 JSON 或标签。
+"""
+
+async def get_system_reply(user_id: str, instruction: str) -> str:
+    """把系统指令转化为小a口吻的回复（用于闹钟、备忘录等后台消息）。"""
+    try:
+        client = get_client()
+        _, _, model = load_llm_settings()
+        
+        # 获取用户画像，以便正确称呼
+        profile_data = get_all_profile(user_id) or {}
+        if profile_data:
+            profile_str = "\n".join([f"- {k}: {v}" for k, v in profile_data.items()])
+        else:
+            profile_str = "无"
+
+        prompt = SYSTEM_REPLY_PROMPT.format(
+            instruction=instruction,
+            profile_str=profile_str
+        )
+
+        messages = [
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": "请生成一条回复。"}
+        ]
+        
+        response = await client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=0.7, # 稍微高一点，让语气更自然
+            max_tokens=150,
+            timeout=20.0
+        )
+        
+        reply = (response.choices[0].message.content or "").strip()
+        # 清理可能产生的引号
+        if reply.startswith('"') and reply.endswith('"'):
+            reply = reply[1:-1]
+        
+        return reply
+
+    except Exception as e:
+        logger.error(f"[system_reply] failed: {e}")
+        # 降级：直接返回指令原义，但稍微包装一下
+        return f"（小a：{instruction}）"

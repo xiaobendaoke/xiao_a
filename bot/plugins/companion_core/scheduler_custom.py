@@ -12,6 +12,8 @@ from datetime import datetime, timedelta
 from nonebot import get_bot, logger, require
 from .db import save_schedule, get_pending_schedules, update_schedule_status
 from .memory import add_memory as add_chat_memory
+from .llm_core import get_system_reply
+from .reply_manager import send_private_bubbles
 
 # 引入 apscheduler
 require("nonebot_plugin_apscheduler")
@@ -127,7 +129,9 @@ async def try_handle_schedule(user_id: str, user_input: str) -> str | None:
     elif trigger_dt.date() != datetime.now().date():
         fmt_time = "明天 " + fmt_time
         
-    reply = f"好的，我会在 {fmt_time} 提醒你：{remind_content}"
+    instruction = f"告诉用户闹钟设置成功了，我会在 {fmt_time} 叫他。提醒内容是：{remind_content}"
+    reply = await get_system_reply(user_id, instruction)
+    
     add_chat_memory(user_id, "user", text)
     add_chat_memory(user_id, "assistant", reply)
     return reply
@@ -151,9 +155,9 @@ async def check_schedules():
         content = task["content"]
         
         try:
-            msg = f"⏰ 叮叮！时间到啦～\n{content}"
-            # 只有内容不为空才发，或者发默认提示
-            await bot.send_private_msg(user_id=int(uid), message=msg)
+            instruction = f"闹钟时间到了！快提醒用户：{content}。"
+            reply = await get_system_reply(str(uid), instruction)
+            await send_private_bubbles(uid, reply)
             update_schedule_status(tid, "done")
             logger.info(f"[schedule] triggered id={tid} uid={uid}")
         except Exception as e:

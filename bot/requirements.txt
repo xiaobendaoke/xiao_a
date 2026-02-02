@@ -11,3 +11,4 @@ beautifulsoup4
 dashscope>=1.23.9
 tushare>=1.4.0
 pyyaml>=6.0
+chromadb>=0.4.0

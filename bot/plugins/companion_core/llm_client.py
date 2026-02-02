@@ -51,3 +51,30 @@ def get_client() -> AsyncOpenAI:
 _load_llm_settings = load_llm_settings
 _get_client = get_client
 
+
+# === Embedding Support ===
+DEFAULT_EMBEDDING_MODEL = "BAAI/bge-m3"
+
+def load_embedding_model() -> str:
+    """获取 Embedding 模型名称（优先环境变量 EMBEDDING_MODEL）"""
+    return (os.getenv("EMBEDDING_MODEL") or DEFAULT_EMBEDDING_MODEL).strip()
+
+async def get_text_embedding(text: str) -> list[float] | None:
+    """调用 API 获取文本向量"""
+    if not text or not text.strip():
+        return None
+    
+    try:
+        client = get_client()
+        model = load_embedding_model()
+        # 兼容处理：有些文本太长需要截断，但目前简单处理
+        resp = await client.embeddings.create(
+            input=text.replace("\n", " "),
+            model=model
+        )
+        return resp.data[0].embedding
+    except Exception as e:
+        # 避免在这里打太多日志，外层处理
+        print(f"[Embedding Error] {e}")
+        return None
+

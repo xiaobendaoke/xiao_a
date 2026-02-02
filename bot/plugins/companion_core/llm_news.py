@@ -305,17 +305,146 @@ def _filter_items_for_query(items: list[dict], query: str) -> list[dict]:
     return (top[:8] or ranked[:8]) if ranked else []
 
 
+    return s.strip()
+
+
+def _is_general_news_query(user_text: str) -> bool:
+    """判断是否为“泛资讯查询”（如“今天有什么新闻”），而非查特定事实。"""
+    t = (user_text or "").strip()
+    # 必须包含泛指词
+    if not re.search(r"(新闻|热点|热搜|资讯|大事|发生什么|发生啥)", t):
+        return False
+    # 如果包含具体实体（金价、汇率、某人名），则不算泛指
+    if re.search(r"(金价|股价|汇率|多少钱|价格|是谁|哪家|怎么样|评价)", t):
+        return False
+    # 长度较短通常是泛指
+    if len(t) < 12:
+        return True
+    return False
+
+
+async def _hybrid_search_flow(query: str) -> tuple[str, list[dict]]:
+    """精准新闻模式：RSS (发现热点) -> Google (验证详情)"""
+    logger.info(f"[search] entering hybrid mode for: {query}")
+    
+    # 1. RSS Discovery
+    # 并发抓取所有源
+    try:
+        rss_items = await asyncio.wait_for(fetch_feeds(list(_NEWS_RSS_FALLBACK_FEEDS), limit_each=3), timeout=10.0)
+        logger.info(f"[search] hybrid: rss_items={len(rss_items or [])}")
+    except Exception as e:
+        logger.warning(f"[search] hybrid rss failed: {e}")
+        rss_items = []
+
+    # 简单过滤：只保留有标题的
+    valid_items = [it for it in (rss_items or []) if it.get("title")]
+    # 如果 RSS 挂了，回退到普通 Google 搜 query
+    if not valid_items:
+        logger.info("[search] hybrid: no rss items, fallback to direct google")
+        return await _direct_google_search(query)
+
+    # 2. 提取 Top Topics
+    # 简单策略：直接取前 2 条不同标题的新闻（假设 RSS 源本身就是按热度或时间排序的）
+    # 更好的策略可能需要去重
+    top_items = []
+    seen_titles = set()
+    for it in valid_items:
+        t = it["title"]
+        if t in seen_titles:
+            continue
+        seen_titles.add(t)
+        top_items.append(it)
+        if len(top_items) >= 2:
+            break
+            
+    if not top_items:
+        return await _direct_google_search(query)
+
+    # 3. Google Verification
+    # 对 Top 2 话题进行并行 Google 搜索
+    # 构造查询词："{title} 详情 真实性"
+    tasks = []
+    for it in top_items:
+        q = f"{it['title']} 报道"  # 加“报道”更容易搜到新闻
+        tasks.append(google_cse_search(q, max_results=2))
+        
+    logger.info(f"[search] hybrid: verifying {len(tasks)} topics via google")
+    try:
+        google_results_list = await asyncio.gather(*tasks, return_exceptions=True)
+    except Exception as e:
+        logger.warning(f"[search] hybrid google verify failed: {e}")
+        google_results_list = []
+
+    # 4. 聚合结果
+    final_results = []
+    # 先把 RSS 原文加入（作为底料）
+    for it in top_items:
+        final_results.append({
+            "title": f"[RSS热点] {it['title']}",
+            "href": it.get("link"),
+            "body": _strip_html(it.get("summary") or "")[:150]
+        })
+        
+    # 再把 Google 验证结果加入
+    for res in google_results_list:
+        if isinstance(res, list):
+            final_results.extend(res)
+            
+    formatted = _format_search_results(final_results)
+    sources = _dedupe_sources(final_results)
+    
+    return (
+        "【最新资讯线索 (精准模式)】\n"
+        f"{formatted}\n"
+        "【使用要求】这是经由 RSS 发现并经 Google 验证的热点新闻。请综合多方来源进行综述；"
+        "如果不同来源有冲突，请指出。不要编造细节。\n"
+    ), sources
+
+
+async def _direct_google_search(query: str) -> tuple[str, list[dict]]:
+    """原有的直接 Google 搜索逻辑"""
+    try:
+        results = await asyncio.wait_for(google_cse_search(query, max_results=5), timeout=8.0)
+    except Exception as e:
+        logger.warning(f"[search] google failed: {e!r}")
+        results = None
+        
+    formatted = _format_search_results(results or [])
+    sources = _dedupe_sources(results or [])
+    
+    if not formatted:
+        # Google 失败，尝试 RSS 兜底
+        try:
+            items = await asyncio.wait_for(fetch_feeds(list(_NEWS_RSS_FALLBACK_FEEDS), limit_each=4), timeout=12.0)
+        except Exception:
+            items = []
+        # 按 query 过滤
+        items = _filter_items_for_query(items, query)
+        formatted = _format_rss_items(items)
+        if not formatted:
+             return (
+                "【最新资讯线索】\n（暂时不可用）\n", []
+            )
+        sources = _dedupe_sources(
+            [{"title": it.get("title"), "href": it.get("link"), "body": it.get("summary")} for it in (items or [])]
+        )
+        
+    return (
+        "【最新资讯线索】\n"
+        f"{formatted}\n"
+        "【使用要求】直接分享你看到的资讯线索，不要说你在联网搜索。\n"
+    ), sources
+
+
 async def maybe_get_web_search_context(user_text: str) -> tuple[str, list[dict]]:
     """需要“最新信息/新闻/热点”时才做搜索，减少模型凭空编造。"""
     
     # 1. 快速正则判断
     need_search = _regex_check(user_text)
     
-    # 2. 如果正则没过，但问题像是在问事实，尝试 LLM 判断
+    # 2. LLM 判断
     if not need_search:
-        # 简单的预过滤：如果太短或者是明显的闲聊，就不浪费 LLM 了
         if len(user_text) > 4 and not re.match(r"^(你好|早安|晚安|在吗|哈哈)", user_text):
-             # 异步调用 LLM 意图判断
              need_search = await _llm_check(user_text)
              if need_search:
                  logger.info(f"[search] LLM intent triggered for: {user_text[:20]}...")
@@ -328,42 +457,10 @@ async def maybe_get_web_search_context(user_text: str) -> tuple[str, list[dict]]
         return "", []
 
     logger.info(f"[search] query={query!r}")
-
-    # 1) 优先走 Google Programmable Search（Custom Search JSON API）
-    try:
-        results = await asyncio.wait_for(google_cse_search(query, max_results=5), timeout=8.0)
-        logger.info(f"[search] google_results={len(results or [])}")
-    except Exception as e:
-        logger.warning(f"[search] google failed: {e!r}")
-        results = None
-
-    formatted = _format_search_results(results or [])
-    sources = _dedupe_sources(results or [])
-    if not formatted:
-        # 2) 兜底走 RSS（更像“刷到资讯”）
-        try:
-            items = await asyncio.wait_for(fetch_feeds(list(_NEWS_RSS_FALLBACK_FEEDS), limit_each=4), timeout=12.0)
-            logger.info(f"[search] rss_items={len(items or [])}")
-        except Exception as e:
-            logger.warning(f"[search] rss fallback failed: {e}")
-            items = []
-
-        items = _filter_items_for_query(items, query)
-        formatted = _format_rss_items(items)
-        if not formatted:
-            return (
-                "【最新资讯线索】\n"
-                "（暂时不可用）\n"
-                "【使用要求】如果用户问的是最新新闻/热点，请坦诚说明你现在拿不到可靠的最新资讯，不要编造细节。\n"
-            ), []
-        sources = _dedupe_sources(
-            [{"title": it.get("title"), "href": it.get("link"), "body": it.get("summary")} for it in (items or [])]
-        )
-
-    return (
-        "【最新资讯线索】\n"
-        f"{formatted}\n"
-        "【使用要求】把它当成你刚刚看到的资讯线索来分享（讲重点+你的感受）；"
-        "不要说你在搜索/联网；不确定就说不确定，也不要编造不存在的新闻细节。\n"
-    ), sources
+    
+    # 3. 分流：泛资讯 vs 精准事实
+    if _is_general_news_query(user_text):
+        return await _hybrid_search_flow(query)
+    else:
+        return await _direct_google_search(query)
 
