@@ -143,21 +143,9 @@ def bubble_parts(text: str) -> list[str]:
         else:
             merged.append(piece)
 
-    # 再次打包：确保单条不超限
-    bubbles: list[str] = []
-    current = ""
-    for piece in merged:
-        if not current:
-            current = piece
-            continue
-        joiner = "\n" if ("```" in current or "```" in piece) else "\n"
-        if len(current) + len(joiner) + len(piece) <= MAX_CHARS:
-            current = f"{current}{joiner}{piece}"
-        else:
-            bubbles.append(current.strip())
-            current = piece
-    if current.strip():
-        bubbles.append(current.strip())
+    # 注意：不再"再次打包"！按换行分开的片段保持独立
+    # 只做数量限制
+    bubbles = merged
 
     # 限制气泡数量（宽松上限，尽量说完）
     if len(bubbles) > MAX_BUBBLES:

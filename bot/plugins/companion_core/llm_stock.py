@@ -51,6 +51,9 @@ STOCK_CHAT_SYSTEM = """你是“小a”，温柔、自然、有生活感的中�
 如果没有公告标题：必须写“标题证据不足，更像情绪/资金走动”。"""
 
 
+
+from .finance_daily.prompts import FOLLOW_UP_V2_SYSTEM
+
 async def generate_stock_chat_text(payload: dict[str, Any]) -> str:
     client = get_client()
     _, _, model = load_llm_settings()
@@ -75,4 +78,30 @@ async def generate_stock_chat_text(payload: dict[str, Any]) -> str:
     data = _try_json(raw) or {}
     text = str((data or {}).get("text") or "").strip()
     return text
+
+
+async def generate_follow_up_answer(user_text: str, context_text: str) -> str:
+    """进入追问模式，回答用户对之前行情的追问。"""
+    client = get_client()
+    _, _, model = load_llm_settings()
+
+    messages = [
+        {"role": "system", "content": FOLLOW_UP_V2_SYSTEM},
+        {"role": "user", "content": f"【之前的行情分析】\n{context_text}\n\n【用户的追问】\n{user_text}"},
+    ]
+
+    try:
+        # 追问模式需要更多的耐心和解释
+        resp = await client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=0.5, # 稍微降低温度，保持逻辑一致
+            timeout=45.0,
+        )
+        answer = (resp.choices[0].message.content or "").strip()
+        return answer
+    except Exception as e:
+        logger.warning(f"[stock][followup] call failed: {e}")
+        return "哎呀，刚才那段我有点忘了，要不我们换个话题？"
+
 

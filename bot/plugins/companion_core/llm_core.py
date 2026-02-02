@@ -105,10 +105,14 @@ async def get_ai_reply(user_id: str, user_text: str, *, voice_mode: bool = False
         world_context = await get_world_prompt(user_id, user_text=user_text, include_weather=include_weather)
         web_search_context, web_sources = await maybe_get_web_search_context(user_text)
         
+        # 提前判断是否为新闻查询（用于后续跳过 RAG）
+        is_news_query = should_web_search(user_text) and bool(web_search_context)
+        
         # ✅ RAG 检索：查找相关长期记忆
+        # 新闻类查询跳过 RAG（避免旧新闻数据干扰实时信息）
         rag_context_str = ""
         # 仅当文本有一定长度时才检索，避免“嗯/啊”之类的短语触发无效搜索
-        if len(user_text) > 2:
+        if len(user_text) > 2 and not is_news_query:
             try:
                 # 检索属于该用户的相关记忆
                 rag_docs = await search_documents(user_text, n_results=2, filter_meta={"user_id": str(user_id)})
@@ -130,7 +134,7 @@ async def get_ai_reply(user_id: str, user_text: str, *, voice_mode: bool = False
         else:
             profile_str = "目前还不了解用户的个人信息。"
 
-        is_news_query = should_web_search(user_text) and bool(web_search_context)
+        # is_news_query 已在前面判断
 
         context_prefix = (world_context or "").rstrip() + "\n"
         if web_search_context:

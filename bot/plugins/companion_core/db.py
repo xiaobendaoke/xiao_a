@@ -214,9 +214,55 @@ def save_chat(user_id: str, role: str, content: str):
 def load_chats(user_id: str, limit: int = 10):
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT role, content FROM chat_history WHERE user_id = ? ORDER BY id DESC LIMIT ?", (user_id, limit))
+        cursor.execute("SELECT role, content, time FROM chat_history WHERE user_id = ? ORDER BY id DESC LIMIT ?", (user_id, limit))
         rows = cursor.fetchall()
-        return [{"role": r, "content": c} for r, c in reversed(rows)]
+        # 兼容旧代码，这里返回 role/content，顺便把 time 也带上
+        return [{"role": r[0], "content": r[1], "created_at": _parse_sqlite_time(r[2])} for r in reversed(rows)]
+
+def _parse_sqlite_time(time_str: str) -> float:
+    """解析 SQLite CURRENT_TIMESTAMP (UTC) 为本地时间戳"""
+    try:
+        # SQLite 默认是 "YYYY-MM-DD HH:MM:SS" (UTC)
+        # 简单起见，且为了对应 python 的 datetime.now() (local)，我们需要加上时区偏移？
+        # 或者我们统一假定它是 UTC，然后 reflection.py 自己处理。
+        # 为简单起见，我们假设它是 UTC，转成 timestamp。
+        if not time_str: return 0.0
+        dt = datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S")
+        # 补上 UTC 时区
+        from datetime import timezone
+        dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except Exception:
+        return 0.0
+
+def get_recent_active_users(hours: int = 24) -> list[str]:
+    """获取过去 N 小时内活跃过的用户 ID 列表。"""
+    now_ts = _ts(datetime.now())
+    limit_ts = now_ts - (int(hours) * 3600)
+    
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT user_id FROM user_state WHERE last_active_ts >= ? ORDER BY last_active_ts DESC",
+            (limit_ts,)
+        )
+        return [str(r[0]) for r in cursor.fetchall()]
+
+def load_chats_by_time_range(user_id: str, hours: int = 24) -> list[dict]:
+    """获取过去 N 小时的聊天记录。"""
+    # 既然 chat_history 存的是 UTC 字符串，我们就用 SQL 的 datetime 函数比较
+    # date('now', '-24 hours')
+    
+    limit_str = f"-{hours} hours"
+    
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT role, content, time FROM chat_history WHERE user_id = ? AND time >= datetime('now', ?) ORDER BY id ASC",
+            (user_id, limit_str)
+        )
+        rows = cursor.fetchall()
+        return [{"role": r[0], "content": r[1], "created_at": _parse_sqlite_time(r[2])} for r in rows]
 
 # --- ✅ 新增：备忘录操作函数 ---
 def save_profile_item(user_id: str, key: str, value: str):
