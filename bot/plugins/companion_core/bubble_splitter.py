@@ -4,8 +4,11 @@ from __future__ import annotations
 import re
 
 # 只要单句超过这个长度，就尝试找标点切分
-# 设为 1，意味着“只要有标点，咱们就尽量切开”，让气泡更短更碎
-SPLIT_THRESHOLD = 50 
+# 设为 12，让短句更碎、更有"一句一句说"的感觉
+SPLIT_THRESHOLD = 12
+
+# ✅ 语义切分词：优先在这些词后切分，保持语义完整
+SEMANTIC_BREAK_WORDS = ["真的", "特别是", "其实", "不过", "但是", "而且", "所以", "然后", "就是", "感觉"]
 
 def bubble_parts(text: str) -> list[str]:
     """
@@ -41,50 +44,44 @@ def _split_text_smartly(text: str) -> list[str]:
     # 1. 先按物理换行符切分 (Explicit Newline)
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     lines = [line.strip() for line in text.split("\n") if line.strip()]
-    
+
     final_bubbles = []
-    
+
     for line in lines:
-        # 2. 如果这行本身就不长，或者没有“句尾标点”，那就直接作为一条
-        # (但在无标点风格下，我们要看长度)
-        if len(line) < 20: 
+        # 2. 如果这行本身就不长，直接作为一条
+        if len(line) < 12:  # ✅ 阈值从20降到12
             final_bubbles.append(line)
             continue
-            
-        # 3. 尝试按标点符号炸开 (。！？!?)
-        # 这种正则保留分隔符： 'a。b' -> ['a', '。', 'b']
-        parts = re.split(r'([。！？!?])', line)
-        
+
+        # 3. ✅ 优先按语义词切分，保持语义完整
+        # 构建正则：匹配 标点 或 语义词（保留分隔符）
+        break_pattern = r'([。！？!?]|(?<=真的|特别是|其实|不过|但是|而且|所以|然后|就是|感觉))'
+        parts = re.split(break_pattern, line)
+
         buffer = ""
         current_chunk_bubbles = []
-        
+
         for p in parts:
-            if not p: continue
-            
-            # 如果是标点，附在上一句末尾并结束当前气泡
-            if p in "。！？!?":
+            if not p:
+                continue
+
+            # 如果是标点或语义词，附在上一句末尾并结束当前气泡
+            if p in "。！？!?" or p in SEMANTIC_BREAK_WORDS:
                 buffer += p
                 if buffer.strip():
                     current_chunk_bubbles.append(buffer.strip())
                 buffer = ""
             else:
-                # 是正文
-                # 如果 buffer 已经有东西了（说明上一段被强制切断了但没标点？不，逻辑通常是 buffer+标点->push）
-                # 这里处理: text + text (无标点中间连接?? re.split 不会产生这个)
-                # re.split 结果通常是 [text, sep, text, sep...]
                 buffer += p
-        
+
         # 处理末尾残留
         if buffer.strip():
             current_chunk_bubbles.append(buffer.strip())
-            
-        # 4. 如果切分虽然完成了，但有些句子还是太长（比如全是逗号的），再尝试按空格 切分
-        # 或者 刚才根本就没切开（即 current_chunk_bubbles 只有一个元素 == line）
-        
-        # 为了避免太碎，我们这里只对“长文本”做二次切分
+
+        # 4. 如果切分后还是太长，再尝试二次切分
         for bubble in current_chunk_bubbles:
             final_bubbles.extend(_try_split_by_space_or_comma(bubble))
-            
+
     return final_bubbles
 
 

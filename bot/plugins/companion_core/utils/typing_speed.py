@@ -50,7 +50,7 @@ def _count_units(text: str) -> float:
 
 
 def typing_delay_seconds(text: str, *, user_id: Optional[str | int] = None) -> float:
-    """根据文本内容估算“人类打字耗时”，用于发送前等待。"""
+    """根据文本内容估算"人类打字耗时"，用于发送前等待。"""
     s = (text or "").strip()
     if not s:
         return 0.2
@@ -62,9 +62,21 @@ def typing_delay_seconds(text: str, *, user_id: Optional[str | int] = None) -> f
     end_pause = 0.0
     if s.endswith(("。", "！", "？", "!", "?", "…")):
         end_pause += 0.35
-    comma_count = s.count("，") + s.count(",") + s.count("、")
+    comma_count = s.count("，") + s.count(",") + s.count("。") + s.count("、")
     end_pause += min(0.35, comma_count * 0.05)
 
     jitter = random.uniform(-0.08, 0.18)
     delay = base + units / cps + end_pause + jitter
-    return max(0.35, min(delay, 4.5))
+
+    # ✅ 根据消息长度动态调整上限（长消息更真实）
+    text_len = len(s)
+    if text_len < 10:
+        max_delay = 3.0
+    elif text_len < 30:
+        max_delay = 6.0
+    elif text_len < 60:
+        max_delay = 10.0
+    else:
+        max_delay = min(15.0, 3.0 + text_len * 0.2)  # 长消息最多15秒
+
+    return max(0.35, min(delay, max_delay))

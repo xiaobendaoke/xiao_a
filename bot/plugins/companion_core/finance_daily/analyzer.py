@@ -13,7 +13,7 @@ from nonebot import logger
 
 from ..llm_client import get_client, load_llm_settings
 from .data import StockDetail
-from .prompts import STOCK_DAILY_REPORT_V2_SYSTEM, MARKET_OVERVIEW_V2_SYSTEM
+from .prompts import STOCK_DAILY_REPORT_V3_SYSTEM, MARKET_OVERVIEW_V3_SYSTEM
 
 
 def _build_stock_context(detail: StockDetail) -> str:
@@ -72,7 +72,7 @@ async def generate_market_overview(gainers: list[StockDetail], losers: list[Stoc
         response = await client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "system", "content": MARKET_OVERVIEW_V2_SYSTEM},
+                {"role": "system", "content": MARKET_OVERVIEW_V3_SYSTEM},
                 {"role": "user", "content": context},
             ],
             temperature=0.7,
@@ -131,20 +131,22 @@ async def generate_daily_report(data: dict) -> list[str]:
         response = await client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "system", "content": STOCK_DAILY_REPORT_V2_SYSTEM},
+                {"role": "system", "content": STOCK_DAILY_REPORT_V3_SYSTEM},
                 {"role": "user", "content": f"今天的候选股票数据：\n\n{full_context}"},
             ],
-            temperature=0.7,
-            max_tokens=1000, # 允许生成多段
+            temperature=0.75, # 稍微调高点，增加灵气
+            max_tokens=1000,
         )
         content = (response.choices[0].message.content or "").strip()
         
-        # 解析结果：按 "---" 分割
-        parts = content.split("---")
-        for p in parts:
-            p = p.strip()
-            if p:
-                messages.append(p)
+        # V3 提示词要求“不要用横线分隔”，且输出为“纯文本”。
+        # 所以我们不再做 split("---")，而是直接把整个文案作为一个大消息。
+        # 后续的 bubble_splitter 会负责把它切成微信小气泡。
+        if content:
+            # 简单清理 markdown 格式
+            content = content.replace("```json", "").replace("```", "").strip()
+            messages.append(content)
+
                 
     except Exception as e:
         logger.error(f"[finance_daily] generate stocks failed: {e}")
