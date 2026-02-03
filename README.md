@@ -440,7 +440,7 @@ docker compose logs -f napcat
 
 ```ini
 # SiliconFlow（推荐）
-SILICONFLOW_API_KEY=sk-xxxx
+SILICONFLOW_API_KEY=sk-xxxx,sk-yyyy,sk-zzzz  # 支持多Key（逗号分隔），自动轮询重试
 SILICONFLOW_BASE_URL=https://api.siliconflow.cn/v1
 SILICONFLOW_MODEL=deepseek-ai/DeepSeek-V3
 

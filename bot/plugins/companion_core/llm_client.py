@@ -14,37 +14,87 @@ from openai import AsyncOpenAI
 DEFAULT_BASE_URL = "https://api.siliconflow.cn/v1"
 DEFAULT_MODEL = "deepseek-ai/DeepSeek-V3"
 
-_client: AsyncOpenAI | None = None
+_clients: list[AsyncOpenAI] = []
+_current_client_index: int = 0
 
 
 def load_llm_settings() -> tuple[str, str, str]:
-    api_key = (
+    # 支持多 Key（逗号分隔）：sk-1,sk-2,sk-3
+    raw_keys = (
         os.getenv("SILICONFLOW_API_KEY")
         or os.getenv("DEEPSEEK_API_KEY")
         or os.getenv("OPENAI_API_KEY")
         or ""
     ).strip()
+    
+    # 清理注释和空格
+    keys = []
+    for k in raw_keys.split(","):
+        k = k.split()[0].strip()
+        if k:
+            keys.append(k)
+            
+    # 如果没配 Key，返回空字符串（后续报错）
+    api_key = keys[0] if keys else ""
+    
     base_url = (os.getenv("SILICONFLOW_BASE_URL") or os.getenv("DEEPSEEK_BASE_URL") or DEFAULT_BASE_URL).strip()
     model = (os.getenv("SILICONFLOW_MODEL") or os.getenv("DEEPSEEK_MODEL") or DEFAULT_MODEL).strip()
 
-    # 兼容 `.env` 里带行尾注释/空格：`KEY=xxx  # comment`
-    api_key = api_key.split()[0] if api_key else ""
+    # 兼容 `.env` 里带行尾注释/空格
     base_url = base_url.split()[0] if base_url else ""
     model = model.split()[0] if model else ""
     return api_key, base_url, model
 
 
+def _init_clients():
+    global _clients
+    if _clients:
+        return
+
+    raw_keys = (
+        os.getenv("SILICONFLOW_API_KEY")
+        or os.getenv("DEEPSEEK_API_KEY")
+        or os.getenv("OPENAI_API_KEY")
+        or ""
+    ).strip()
+    
+    base_url = (os.getenv("SILICONFLOW_BASE_URL") or os.getenv("DEEPSEEK_BASE_URL") or DEFAULT_BASE_URL).strip()
+    base_url = base_url.split()[0] if base_url else ""
+    
+    keys = []
+    for k in raw_keys.split(","):
+        k = k.split()[0].strip()
+        if k:
+            keys.append(k)
+            
+    if not keys:
+         raise RuntimeError("缺少 SILICONFLOW_API_KEY（或 OPENAI_API_KEY）环境变量")
+
+    _clients = [AsyncOpenAI(api_key=k, base_url=base_url) for k in keys]
+    print(f"[llm_client] Loaded {len(_clients)} keys.")
+
+
 def get_client() -> AsyncOpenAI:
-    global _client
-    if _client is not None:
-        return _client
+    global _clients, _current_client_index
+    if not _clients:
+        _init_clients()
+    return _clients[_current_client_index]
 
-    api_key, base_url, _ = load_llm_settings()
-    if not api_key:
-        raise RuntimeError("缺少 SILICONFLOW_API_KEY（或 OPENAI_API_KEY）环境变量")
 
-    _client = AsyncOpenAI(api_key=api_key, base_url=base_url)
-    return _client
+def rotate_key() -> bool:
+    """切换到下一个 API Key。如果切换成功返回 True，如果没有更多 Key 可切（转了一圈）返回 False（但这里简单实现为永远轮询）。"""
+    global _clients, _current_client_index
+    if not _clients:
+        return False
+    
+    n = len(_clients)
+    if n <= 1:
+        return False
+        
+    prev = _current_client_index
+    _current_client_index = (_current_client_index + 1) % n
+    print(f"[llm_client] Rotating key: {prev} -> {_current_client_index} (Total: {n})")
+    return True
 
 
 # === Backward compatible aliases ===

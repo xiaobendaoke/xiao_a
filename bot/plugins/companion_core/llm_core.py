@@ -216,16 +216,43 @@ async def get_ai_reply(user_id: str, user_text: str, *, voice_mode: bool = False
             "content": "（System: 现在的语境是微信闲聊。请把回复写得短一点、松弛一点、口语化一点。不要像在写作文。不要复述规则。）"
         })
 
-        response = await client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=final_temperature,
-            max_tokens=(VOICE_MAX_TOKENS if voice_mode else (CHAT_MAX_TOKENS_SKILL if skill_prompt else CHAT_MAX_TOKENS)),
-            # frequency_penalty=0.2,   # 如果你的网关支持，可打开：减少复读/口癖
-            timeout=30.0
-        )
-
-        raw_content = (response.choices[0].message.content or "").strip()
+        # ========================================================================
+        # ♻️ Key Rotation / Retry Logic
+        # ========================================================================
+        from .llm_client import rotate_key
+        raw_content = ""
+        max_retries = 2  # 最多重试2次（也就是最多试3个key）
+        
+        for attempt in range(max_retries + 1):
+            try:
+                # 每次重试前获取最新的 client（rotate_key 会更新全局 client）
+                client = get_client()
+                response = await client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=final_temperature,
+                    max_tokens=(VOICE_MAX_TOKENS if voice_mode else (CHAT_MAX_TOKENS_SKILL if skill_prompt else CHAT_MAX_TOKENS)),
+                    # frequency_penalty=0.2,   # 如果你的网关支持，可打开：减少复读/口癖
+                    timeout=30.0
+                )
+                raw_content = (response.choices[0].message.content or "").strip()
+                break # 成功则跳出循环
+                
+            except Exception as e:
+                # 检查是否是 403 (RPM/Credit) 或 429 (Rate Limit)
+                # SiliconFlow 的 403 通常包含 "RPM limit exceeded"
+                msg = str(e)
+                is_rate_limit = "403" in msg or "429" in msg or "RPM limit" in msg or "Credit" in msg
+                
+                if is_rate_limit and attempt < max_retries:
+                    logger.warning(f"[LLM] Hit rate limit ({msg[:50]}...), rotating key and retrying ({attempt+1}/{max_retries})...")
+                    if rotate_key():
+                        continue # 切换成功，重试
+                    else:
+                        logger.error("[LLM] Key rotation failed (no more keys).")
+                        raise e # 没 key 可切了，抛出异常
+                else:
+                    raise e # 其他错误或重试耗尽，直接抛出
         logger.opt(colors=True).info(f"<yellow>小a原始回复(含标签)：</yellow> {raw_content}")
 
         clean_reply, mood_change, updates = extract_tags_and_clean(raw_content)
