@@ -707,15 +707,91 @@ async def handle_private_chat(event: PrivateMessageEvent):
         else:
             await _send_and_finish(reply, user_id=user_id)
 
+        # 2. 假忙碌机制 (已移除随机触发，保留接口供未来扩展)
+        # busy_reason = _is_fake_busy(user_id)
+        # if busy_reason == "busy_ignoring":
+        #    return
+        # elif busy_reason:
+        #    await _send_and_finish(busy_reason, user_id=user_id)
+        #    return
+        
+        # ========================================================================
+        
+        # ========================================================================
+
+
+        # ✅ 尝试记住用户所在地（用户回答城市时不依赖 LLM 标签）
+        _maybe_learn_city_from_user_text(user_id, user_input)
+
+        # 1) “要链接/出处/来源”跟进：发送上一轮搜索的来源链接
+        await _handle_source_request_if_any(user_id, user_input)
+
+        # 2) 简单限流：防止刷屏
+        now = time.time()
+        if not _check_and_update_rate_limit(user_id, now):
+            return
+
+        # 3) 输入中检测：等待对方输入结束，避免打扰
+        await _wait_if_user_typing(user_id)
+
+        # 4) 图片理解：优先处理图片（或缓存等待下一条文字）
+        handled = await _handle_image_request_if_any(user_id, message, user_input, now)
+        if handled:
+            return
+
+        # 5) 时间询问：直接返回系统时间（避免模型乱编）
+        await _handle_time_request_if_any(user_id, user_input)
+
+        # 6) “总结”跟进：对上一条 ASK 的链接做总结
+        await _handle_summary_followup_if_any(user_id, user_input, now)
+
+        # 6.5) 日程提醒
+        schedule_reply = await try_handle_schedule(str(user_id), user_input)
+        if schedule_reply:
+            await _send_and_finish(schedule_reply, user_id=user_id)
+
+        # 7) URL 自动处理：LLM 判断是否要总结/确认
+        await _handle_url_auto_if_any(user_id, user_input, now)
+
+        # 7.2) 智能备忘录
+        memo_reply = await try_handle_memo(str(user_id), user_input)
+        if memo_reply:
+            await _send_and_finish(memo_reply, user_id=user_id)
+            
+        # 7.4) RAG 显式记忆
+        rag_reply = await _try_handle_rag_explicit(user_id, user_input)
+        if rag_reply:
+            await _send_and_finish(rag_reply, user_id=user_id)
+
+        # 7.5) 股票查询（私聊命令）
+        await _handle_stock_query_if_any(user_id, user_input)
+
+        # 8) 默认走普通聊天逻辑
+        voice_wanted = _looks_like_voice_reply_request(user_input)
+        reply = await get_ai_reply(str(user_id), user_input, voice_mode=voice_wanted)
+        if voice_wanted:
+            try:
+                mood = mood_manager.get_user_mood(str(user_id))
+                record_b64 = await synthesize_record_base64(reply, mood=mood)
+                await chat_handler.finish(MessageSegment.record(file=record_b64))
+            except FinishedException:
+                raise
+            except Exception as e:
+                logger.exception(f"[voice] tts failed(uid={user_id}) on text: {e}")
+                await _send_and_finish(reply, user_id=user_id)
+        else:
+            await _send_and_finish(reply, user_id=user_id)
+
     except FinishedException:
         raise
     except Exception as e:
         logger.exception(e)
         msg_instruction = "系统刚刚报错了。请温柔地请求用户再试一次。"
+        msg = "呜…系统出错了，你稍后再试一次好不好？"
         uid = locals().get("user_id", None)
         if uid:
              try:
-                 msg = await get_system_reply(str(uid), "系统刚刚报错了。请温柔地请求用户再试一次。")
+                 msg = await get_system_reply(str(uid), msg_instruction)
              except:
                  pass
         
