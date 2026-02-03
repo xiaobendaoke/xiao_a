@@ -1,154 +1,133 @@
-"""气泡分割模块 - 把回复文本拆成"气泡段落"，模拟真人分段发送。
-
-设计目标：
-- 单条气泡约 90 字（更像真人聊天节奏）
-- 过短片段自动合并（min_chars=15，避免碎碎碎）
-- 递归分隔符优先级：段落 → 句号 → 逗号 → 硬切
-- 总气泡数上限 12 条（尽量说完，不强制截断）
-"""
+# bot/plugins/companion_core/bubble_splitter.py
 
 from __future__ import annotations
-
 import re
 
-MAX_BUBBLES = 12
-MAX_CHARS = 90   # 单条气泡目标长度
-MIN_CHARS = 6    # 过短片段合并阈值
-
-# 递归分隔符优先级（从强到弱）
-SEPARATORS = [
-    ("\n\n", True),      # 段落分隔
-    ("\n", True),        # 单换行（优先切分）
-    ("。！？!?；;", False),  # 句末标点
-    ("，,、：:", False),    # 弱断句标点
-]
-
-
-def _split_by_chars(t: str, chars: str) -> list[str]:
-    """按字符集切分（标点保留在前一段末尾）。"""
-    buf = ""
-    out: list[str] = []
-    for ch in t:
-        buf += ch
-        if ch in chars:
-            if buf.strip():
-                out.append(buf.strip())
-            buf = ""
-    if buf.strip():
-        out.append(buf.strip())
-    return out
-
-
-def _hard_chunk(t: str, n: int) -> list[str]:
-    """硬切：最后的兜底手段。"""
-    t = (t or "").strip()
-    if not t:
-        return []
-    return [t[i:i + n].strip() for i in range(0, len(t), n) if t[i:i + n].strip()]
-
-
-def _recursive_split(t: str, sep_idx: int = 0) -> list[str]:
-    """递归分隔符分割：优先用强分隔符，不够再用弱分隔符。"""
-    t = (t or "").strip()
-    if not t:
-        return []
-    
-    # 尝试当前分隔符
-    if sep_idx < len(SEPARATORS):
-        sep, is_str = SEPARATORS[sep_idx]
-        
-        # 逻辑修正：换行符（强分隔符）总是尝试切分，不管文本多短
-        # 标点符号（弱分隔符）只有在文本超长时才切分
-        start_split = False
-        if is_str:
-            # 强分隔符（\n\n, \n）：总是切
-            start_split = True
-        else:
-            # 弱分隔符：只有超长才切
-            if len(t) > MAX_CHARS:
-                start_split = True
-        
-        if start_split:
-            if is_str:
-                parts = [p.strip() for p in t.split(sep) if p.strip()]
-            else:
-                parts = _split_by_chars(t, sep)
-
-            if len(parts) > 1:
-                # 分割成功，继续递归（处理子块可能还需要细分的情况）
-                result: list[str] = []
-                for p in parts:
-                    result.extend(_recursive_split(p, sep_idx))  # 保持当前 idx（例如 \n 后可能有 \n）吗？不，应该继续往下
-                    # 其实 split 已经把当前 sep 消耗了，但子块里可能还有同级 sep（如果 split 是全切的话）
-                    # string.split 是全切，但 _split_by_chars 也是全切。
-                    # 所以子块里不会再有当前 sep 了（除非是标点保留在末尾的情况）。
-                    # 稳妥起见，对子块用 sep_idx 或 sep_idx + 1？
-                    # 统一用 sep_idx + 1，避免死循环。
-                    # 但 wait，如果一段话有多个换行，parts已经是切好的列表。
-                    # 对每个 part，我们需要检查它是不是还超长，或者有没有更低级的标点。
-                    # 所以应该传 sep_idx + 1。
-                
-                # 还有一种情况：如果这是一个"换行符切分"，子块可能很短，但也可能很长。
-                # 所以子块需要继续递归 sep_idx+1。
-                
-                # 重写递归逻辑：
-                final_parts = []
-                for p in parts:
-                    final_parts.extend(_recursive_split(p, sep_idx + 1))
-                return final_parts
-            
-        # 如果当前分隔符没切（没匹配到，或者不该切），尝试下一个
-        return _recursive_split(t, sep_idx + 1)
-
-    # 所有分隔符都试过了
-    if len(t) > MAX_CHARS:
-        return _hard_chunk(t, MAX_CHARS)
-    return [t]
-
+# 只要单句超过这个长度，就尝试找标点切分
+# 设为 1，意味着“只要有标点，咱们就尽量切开”，让气泡更短更碎
+SPLIT_THRESHOLD = 50 
 
 def bubble_parts(text: str) -> list[str]:
-    """把要发送的文本拆成"气泡段落"，模拟真人分段发送。
-
-    返回一个字符串列表，每个元素代表一条消息气泡。
+    """
+    智能气泡分段：
+    1. 显式换行符 (\n) 是最强拆分信号。
+    2. 标点符号 (。！？) 是次级拆分信号。
+    3. 空格 ( ) 在某些情况下也作为拆分信号（针对无标点流）。
     """
     s = str(text or "").strip()
     if not s:
         return []
 
-    # 保护代码块：避免把 ``` ``` 内部拆碎
+    # 1. 保护代码块（不切分代码）
     code_re = re.compile(r"```.*?```", re.S)
-    candidates: list[str] = []
+    segments = []
     last = 0
     for m in code_re.finditer(s):
-        before = s[last:m.start()]
-        candidates.extend(_recursive_split(before))
+        pre_text = s[last:m.start()]
+        segments.extend(_split_text_smartly(pre_text))
+        
         block = (m.group(0) or "").strip()
         if block:
-            candidates.append(block)
+            segments.append(block)
         last = m.end()
-    candidates.extend(_recursive_split(s[last:]))
+    
+    segments.extend(_split_text_smartly(s[last:]))
 
-    # 合并过短片段（避免碎碎碎）
-    merged: list[str] = []
-    for piece in [c for c in candidates if c.strip()]:
-        if not merged:
-            merged.append(piece)
+    return [p.strip() for p in segments if p.strip()]
+
+
+def _split_text_smartly(text: str) -> list[str]:
+    """核心切分逻辑"""
+    # 1. 先按物理换行符切分 (Explicit Newline)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines = [line.strip() for line in text.split("\n") if line.strip()]
+    
+    final_bubbles = []
+    
+    for line in lines:
+        # 2. 如果这行本身就不长，或者没有“句尾标点”，那就直接作为一条
+        # (但在无标点风格下，我们要看长度)
+        if len(line) < 20: 
+            final_bubbles.append(line)
             continue
-        last_piece = merged[-1]
-        # 如果当前片段太短，且合并后不超限，就合并
-        if len(piece) < MIN_CHARS and len(last_piece) + len(piece) + 1 <= MAX_CHARS:
-            merged[-1] = f"{last_piece}\n{piece}"
-        elif len(last_piece) < MIN_CHARS and len(last_piece) + len(piece) + 1 <= MAX_CHARS:
-            merged[-1] = f"{last_piece}\n{piece}"
+            
+        # 3. 尝试按标点符号炸开 (。！？!?)
+        # 这种正则保留分隔符： 'a。b' -> ['a', '。', 'b']
+        parts = re.split(r'([。！？!?])', line)
+        
+        buffer = ""
+        current_chunk_bubbles = []
+        
+        for p in parts:
+            if not p: continue
+            
+            # 如果是标点，附在上一句末尾并结束当前气泡
+            if p in "。！？!?":
+                buffer += p
+                if buffer.strip():
+                    current_chunk_bubbles.append(buffer.strip())
+                buffer = ""
+            else:
+                # 是正文
+                # 如果 buffer 已经有东西了（说明上一段被强制切断了但没标点？不，逻辑通常是 buffer+标点->push）
+                # 这里处理: text + text (无标点中间连接?? re.split 不会产生这个)
+                # re.split 结果通常是 [text, sep, text, sep...]
+                buffer += p
+        
+        # 处理末尾残留
+        if buffer.strip():
+            current_chunk_bubbles.append(buffer.strip())
+            
+        # 4. 如果切分虽然完成了，但有些句子还是太长（比如全是逗号的），再尝试按空格 切分
+        # 或者 刚才根本就没切开（即 current_chunk_bubbles 只有一个元素 == line）
+        
+        # 为了避免太碎，我们这里只对“长文本”做二次切分
+        for bubble in current_chunk_bubbles:
+            final_bubbles.extend(_try_split_by_space_or_comma(bubble))
+            
+    return final_bubbles
+
+
+def _try_split_by_space_or_comma(text: str) -> list[str]:
+    """只有文本过长 (>=30) 时，才尝试用空格/逗号救急"""
+    if len(text) < 30:
+        return [text]
+        
+    # 尝试按空格切分（针对无标点流： "医生开的药是消炎的 记得多休息"）
+    # 只有当空格前后都是中文时，才视作“换气分隔符”
+    # 暂时简单点：直接 split spaces
+    
+    sub_parts = []
+    # 如果包含空格，且片段较长
+    if " " in text:
+        # 简单的按空格分
+        raw_spaces = text.split(" ")
+        buf = ""
+        for seg in raw_spaces:
+            if not seg.strip(): continue
+            # 累积 buffer，直到长度适中
+            if len(buf) + len(seg) < 30:
+                buf += (" " + seg) if buf else seg
+            else:
+                if buf: sub_parts.append(buf)
+                buf = seg
+        if buf: sub_parts.append(buf)
+    else:
+        # 实在没辙，看有没有逗号
+        # 只有在非常长 (>60) 的情况下才切逗号
+        if len(text) > 60:
+             # ... 简单起见，暂不切逗号，保留长句完整性，或者可以切 "，"
+             # 现在的需求是 微信风格，可以切
+             parts = re.split(r'([，,])', text)
+             buf = ""
+             for p in parts:
+                 buf += p
+                 if len(buf) > 30 and p in "，,":
+                     sub_parts.append(buf.strip())
+                     buf = ""
+             if buf: sub_parts.append(buf.strip())
         else:
-            merged.append(piece)
-
-    # 注意：不再"再次打包"！按换行分开的片段保持独立
-    # 只做数量限制
-    bubbles = merged
-
-    # 限制气泡数量（宽松上限，尽量说完）
-    if len(bubbles) > MAX_BUBBLES:
-        bubbles = bubbles[:MAX_BUBBLES]
-
-    return [p for p in bubbles if p.strip()]
+            sub_parts = [text]
+            
+    # 最后的兜底：如果没切出个所以然（sub_parts为空），返回原样
+    return sub_parts if sub_parts else [text]

@@ -65,7 +65,7 @@ def _env_float(name: str, default: float) -> float:
 # 默认聊天偏短、偏稳；可用环境变量覆盖
 CHAT_MAX_TOKENS = _env_int("XIAOA_CHAT_MAX_TOKENS", 240)
 CHAT_MAX_TOKENS_SKILL = _env_int("XIAOA_CHAT_MAX_TOKENS_SKILL", 420)
-CHAT_TEMPERATURE = _env_float("XIAOA_CHAT_TEMPERATURE", 0.6)
+CHAT_TEMPERATURE = _env_float("XIAOA_CHAT_TEMPERATURE", 0.9)
 VOICE_MAX_TOKENS = _env_int("XIAOA_VOICE_MAX_TOKENS", 180)
 
 
@@ -156,26 +156,51 @@ async def get_ai_reply(user_id: str, user_text: str, *, voice_mode: bool = False
         if skill_prompt:
             messages.append({"role": "system", "content": skill_prompt})
 
-        messages.append(
-            {
-                "role": "system",
-                "content": (
-                    f"{context_prefix}"
-                    f"【当前心情】：{current_mood_desc}\n"
-                    f"【你记得的用户信息】：\n{profile_str}\n"
-                    f"【画像使用规则】：只有当用户这句话确实用得上时才引用其中某一条；不要把画像当清单复述；"
-                    f"不要无中生有提旧事（例如比赛/作品/简历等），除非用户主动提到或明确求助。\n"
-                    f"【记忆指令】：当用户明确提供长期稳定信息时，回复末尾另起一行输出 "
-                    f"[UPDATE_PROFILE:键=值]（可多条）。每次回复末尾另起一行输出 [MOOD_CHANGE:x]。\n"
-                    f"【格式要求】：以上标签必须单独占一行，且放在消息最后，不要和正文写在同一行。\n"
-                    f"【天气规则】：只有当用户问到天气/穿衣/带伞/冷不冷/热不热时，才引用【现实环境感知】里的天气字段；"
-                    f"如果天气可用性=不可用或未提供天气字段，就说拿不到可靠天气信息，别编造。\n"
-                    f"【跑题约束】：只围绕用户当前这句话回应；不要突然开启新话题（例如改简历/找工作计划/项目复盘等）。\n"
-                    f"【长度约束】：正文尽量 1-6 行、短句；禁止编号列表（1. 2. 3.）和长段落。\n"
-                    f"【现实感知要求】：现实环境感知里给了“时间/时段”，不要把白天说成凌晨/深夜。"
-                ),
-            }
-        )
+        # --------------------------------------------------------------------------------
+        # 优化提示词：把“规则”包装成“潜意识”，减少命令感
+        # --------------------------------------------------------------------------------
+        
+        # 1. 构建叙述性上下文（Memory Stream）
+        memory_stream = ""
+        if rag_context_str:
+            memory_stream += f"【脑海里闪过的回忆】：\n{rag_context_str}\n"
+        if profile_str:
+            memory_stream += f"【对他/她的印象】：\n{profile_str}\n" 
+        if world_context:
+            memory_stream += f"【当前环境感知】：\n{world_context}\n"
+            
+        memory_stream += f"【当下的心情】：{current_mood_desc}\n"
+
+        # 2. 注入上下文（作为 System 或 User Prompt 的一部分，这里为了权重把它放在 System 后段）
+        # 关键：告诉模型这些是“背景”，不是“考试材料”
+        messages.append({
+            "role": "system", 
+            "content": (
+                f"{memory_stream}\n"
+                f"（注意：以上信息只是你的背景记忆，除非自然话赶话聊到，否则不要刻意在回复里背诵这些信息。）"
+            )
+        })
+
+        # 3. 极简规则（只保留最重要的 Tag 指令，隐藏掉大部分格式指令，依赖 Persona 的 Few-Shot）
+        messages.append({
+            "role": "system",
+            "content": (
+                "【潜意识指令】\n"
+                "1. 只有在心情确实发生变化时才在末尾输出 [MOOD_CHANGE:x]。\n"
+                "2. 只有当用户说了新的重要信息（喜欢什么/讨厌什么/最近发生的事）时才输出 [UPDATE_PROFILE:k=v]。\n"
+                "3. 保持“微信闲聊”的状态。不要长篇大论。不要列 1. 2. 3.。"
+            )
+        })
+
+        # 🛑 Soul Patch: Mood Locking (情绪锁)
+        # 如果心情很差，强制注入指令并降低 Temperature
+        mood_instruction = mood_manager.get_mood_instruction(user_id)
+        final_temperature = CHAT_TEMPERATURE
+        if mood_instruction:
+            messages.append({"role": "system", "content": mood_instruction})
+            # 生气时调低温度，让说话更冷、更克制、不发散
+            final_temperature = 0.5
+            logger.info(f"[mood] locking active for {user_id}: temp={final_temperature}")
 
         # 新闻模式下尽量减少历史干扰（否则容易“顺着聊天走偏”忽略线索）
         hist_keep = 4 if is_news_query else 10
@@ -184,11 +209,17 @@ async def get_ai_reply(user_id: str, user_text: str, *, voice_mode: bool = False
                 messages.append(msg)
 
         messages.append({"role": "user", "content": user_text})
+        
+        # 4. Vibe Check (最后注入，确保 tone 覆盖前面的指令)
+        messages.append({
+            "role": "system",
+            "content": "（System: 现在的语境是微信闲聊。请把回复写得短一点、松弛一点、口语化一点。不要像在写作文。不要复述规则。）"
+        })
 
         response = await client.chat.completions.create(
             model=model,
             messages=messages,
-            temperature=CHAT_TEMPERATURE,
+            temperature=final_temperature,
             max_tokens=(VOICE_MAX_TOKENS if voice_mode else (CHAT_MAX_TOKENS_SKILL if skill_prompt else CHAT_MAX_TOKENS)),
             # frequency_penalty=0.2,   # 如果你的网关支持，可打开：减少复读/口癖
             timeout=30.0

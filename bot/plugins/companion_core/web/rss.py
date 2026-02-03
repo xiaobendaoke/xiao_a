@@ -14,6 +14,7 @@ from typing import List, Dict, Any, Optional
 import asyncio
 import os
 import time
+import random
 
 import httpx
 from nonebot import logger
@@ -173,3 +174,68 @@ async def fetch_feeds(feed_urls: List[str], limit_each: int = 8) -> List[Dict[st
             out.extend(per_url[u][:limit_each])
 
     return out
+
+# ==============================================================================
+# Soul Patch: RSS Recommendation Engine
+# ==============================================================================
+
+# 你的RSSHub订阅源（建议选一些有趣的、非硬核新闻的）
+# 比如：少数派、机核网、热门推特搬运、V2EX等
+RSS_SOURCES = [
+    "https://rsshub.app/36kr/newsflashes",       # 36氪快讯
+    "https://rsshub.app/sspai/index",             # 少数派
+    "https://rsshub.app/douban/movie/playing",    # 豆瓣正在上映
+    "https://rsshub.app/aggr/hot_news",           # 聚合热榜
+]
+
+async def get_random_recommendation() -> dict[str, str] | None:
+    """
+    随机抓取一条有趣的内容用于分享
+    返回: dict {title, summary, link, source} 或 None
+    """
+    import feedparser
+    
+    # 随机选一个源，避免每次都抓取所有，提高速度
+    source_url = random.choice(RSS_SOURCES)
+    
+    try:
+        # 复用 httpx 逻辑
+        timeout = httpx.Timeout(10.0, connect=5.0)
+        async with httpx.AsyncClient(
+            timeout=timeout,
+            follow_redirects=True,
+            proxy=_rss_proxy(),
+            trust_env=False,
+            headers={"User-Agent": _UA}
+        ) as client:
+            resp = await client.get(source_url)
+            if resp.status_code >= 400:
+                logger.warning(f"[rss_rec] fetch failed {source_url}: {resp.status_code}")
+                return None
+            content = resp.content
+
+        feed = await asyncio.to_thread(feedparser.parse, content)
+        
+        if not feed.entries:
+            return None
+            
+        # 从最新的5条里随机挑一条（保证时效性，又有随机性）
+        candidates = feed.entries[:5]
+        item = random.choice(candidates)
+        
+        title = getattr(item, "title", "无标题")
+        link = getattr(item, "link", "")
+        # summary 往往带 HTML，这里简单截断，留给 LLM 去清洗/理解
+        summary_raw = getattr(item, "summary", "") or getattr(item, "description", "") or title
+        
+        source_title = feed.feed.title if hasattr(feed.feed, 'title') else "网上"
+
+        return {
+            "title": title,
+            "summary": summary_raw[:300], # 限制长度
+            "link": link,
+            "source": source_title
+        }
+    except Exception as e:
+        logger.error(f"[rss_rec] error: {e}")
+        return None

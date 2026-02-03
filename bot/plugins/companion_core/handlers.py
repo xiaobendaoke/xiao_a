@@ -19,6 +19,8 @@ import asyncio
 import re
 import os
 from typing import Any
+import random
+from datetime import datetime
 
 from nonebot import on_message, on_notice, get_bot, logger
 from nonebot.adapters.onebot.v11 import PrivateMessageEvent, Message, MessageSegment
@@ -99,6 +101,40 @@ pending_url_by_user: dict[int, dict[str, Any]] = {}
 # 图片待处理：允许“先发图，再发问题”
 pending_image_by_user: dict[int, dict[str, Any]] = {}
 pending_image_task_by_user: dict[int, asyncio.Task] = {}
+
+# 假忙碌状态（模拟真人没空回消息）
+# {user_id: expire_ts}
+fake_busy_expire: dict[int, float] = {}
+
+def _is_sleeping_time() -> bool:
+    """生物钟：2:00 ~ 7:00 是睡觉时间。"""
+    now = datetime.now()
+    return 2 <= now.hour < 7
+
+def _is_fake_busy(user_id: int) -> str | None:
+    """是否处于假忙碌状态。返回理由，None 表示不忙。"""
+    now = time.time()
+    
+    # 1. 检查是否在忙碌冷却中
+    expire = fake_busy_expire.get(user_id, 0)
+    if now < expire:
+        # 正在忙，直接不回（模拟看到消息由于忙没回）
+        # 或者可以回一个“在忙”，这里选择彻底模拟“没空看手机” -> 不回
+        return "busy_ignoring"
+
+    # 2. 只有 5% 概率触发一次新的忙碌（持续 5-10 分钟）
+    if random.random() < 0.05:
+        duration = random.randint(300, 600)
+        fake_busy_expire[user_id] = now + duration
+        reasons = [
+            "等下哈，我在吹头发",
+            "在打游戏，复活了再回你",
+            "我也在忙，一会儿说",
+            "先不聊了，我去洗个澡",
+        ]
+        return random.choice(reasons)
+        
+    return None
 
 
 typing_notice = on_notice(priority=2, block=False)
@@ -574,6 +610,38 @@ async def handle_private_chat(event: PrivateMessageEvent):
         # ✅ 一进来就记录活跃
         touch_active(str(user_id))
         log_user_active_hour(str(user_id))  # 记录活跃小时（用于学习用户习惯）
+
+        # ========================================================================
+        # 💀 Soul Patch: The "Void" Mechanism (生物钟与假忙碌)
+        # ========================================================================
+        
+        # 1. 睡觉机制
+        if _is_sleeping_time():
+            # 80% 概率直接装死（睡着了没听见）
+            if random.random() < 0.8:
+                logger.info(f"[void] sleeping, ignore uid={user_id}")
+                return
+            # 20% 概率被吵醒，回一句困然后结束
+            msg = "困死了... 明天说... 💤"
+            await _send_and_finish(msg, user_id=user_id)
+            return
+
+        # 2. 假忙碌机制
+        # 只有在非命令类（不是查股/总结/日程）时才触发
+        if not (user_input.startswith(("查股", "股票", "总结", "日程", "备忘"))):
+            busy_reason = _is_fake_busy(user_id)
+            if busy_reason == "busy_ignoring":
+                # 正在忙，已读不回
+                logger.info(f"[void] fake busy (ignoring) uid={user_id}")
+                return
+            elif busy_reason:
+                # 刚触发忙碌，回一句理由然后消失
+                logger.info(f"[void] fake busy (start) uid={user_id} reason={busy_reason}")
+                await _send_and_finish(busy_reason, user_id=user_id)
+                return
+        
+        # ========================================================================
+
 
         # ✅ 尝试记住用户所在地（用户回答城市时不依赖 LLM 标签）
         _maybe_learn_city_from_user_text(user_id, user_input)
