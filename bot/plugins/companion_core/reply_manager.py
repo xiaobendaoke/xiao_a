@@ -47,6 +47,14 @@ def update_typing_status(user_id: str | int, is_typing: bool) -> None:
     else:
         ev.set()
 
+def is_user_typing(user_id: str | int) -> bool:
+    """非阻塞检查：用户当前是否正在输入。"""
+    uid = str(user_id)
+    ev = _typing_events.get(uid)
+    if ev is None:
+        return False
+    return not ev.is_set()
+
 # === Splitting Logic ===
 
 def _split_text_to_bubbles(text: str) -> list[str]:

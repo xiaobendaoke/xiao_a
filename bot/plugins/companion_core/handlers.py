@@ -51,9 +51,53 @@ from .reply_manager import (
     send_bubbles_and_finish as _send_bubbles_and_finish,
     send_private_bubbles as _send_private_bubbles,
     wait_if_user_typing as _wait_if_user_typing,
+    is_user_typing,  # Added
     update_typing_status,
     reply_with_error
 )
+
+
+# ========================================================================================
+# 🛡️ Message Debounce & Buffer (防抖与缓冲池)
+# ========================================================================================
+class MessageBuffer:
+    def __init__(self):
+        self.queue: list[str] = []
+        self.lock = asyncio.Lock()
+        self.last_activity = 0.0
+        # 标记当前是否有消费者正在等到防抖结束
+        self.processing_task: asyncio.Task | None = None
+
+    def push(self, text: str):
+        self.queue.append(text)
+        self.last_activity = time.time()
+
+    def pop_all(self) -> str:
+        if not self.queue:
+            return ""
+        # 简单合并：用空格连接
+        merged = " ".join(self.queue)
+        self.queue.clear()
+        return merged
+
+    @property
+    def check_count(self) -> int:
+        return len(self.queue)
+
+# 全局缓冲池：{user_id: MessageBuffer}
+_user_buffers: dict[int, MessageBuffer] = {}
+
+def _get_buffer(user_id: int) -> MessageBuffer:
+    if user_id not in _user_buffers:
+        _user_buffers[user_id] = MessageBuffer()
+    return _user_buffers[user_id]
+
+
+# 基础防抖时间：等待 1.5 秒看有没有下一句
+DEBOUNCE_WAIT_SECONDS = 1.5
+# 正在输入时的防抖上限：如果一直正在输入，最多等 10 秒
+TYPING_MAX_WAIT_SECONDS = 10.0
+
 
 
 async def _try_handle_rag_explicit(user_id: int, text: str) -> str | None:
@@ -607,180 +651,150 @@ async def handle_private_chat(event: PrivateMessageEvent):
                 await asyncio.sleep(typing_delay_seconds(msg, user_id=user_id))
                 await chat_handler.finish(msg)
 
-        user_input = str(message).strip()
-        if not user_input:
+        # ========================================================================
+        # 🛡️ Debounce Logic Start
+        # ========================================================================
+        raw_input = str(message).strip()
+        if not raw_input:
             return
-
-        logger.info(f"[chat] recv uid={user_id} text={user_input[:200]!r}")
-
-        # ✅ 一进来就记录活跃
-        touch_active(str(user_id))
-        log_user_active_hour(str(user_id))  # 记录活跃小时（用于学习用户习惯）
-
-        # ========================================================================
-        # 💀 Soul Patch: The "Void" Mechanism (生物钟与假忙碌)
-        # ========================================================================
         
-        # 1. 睡觉机制
-        if _is_sleeping_time():
-            # 80% 概率直接装死（睡着了没听见）
-            if random.random() < 0.8:
-                logger.info(f"[void] sleeping, ignore uid={user_id}")
+        # 1. Push to buffer
+        buf = _get_buffer(user_id)
+        buf.push(raw_input)
+        
+        current_msg_ts = buf.last_activity
+        
+        # 2. Wait for debounce (dynamic)
+        # 如果检测到用户正在输入，则延长等待，直到输入停止或超时
+        start_wait = time.time()
+        while True:
+            # 基础等待
+            await asyncio.sleep(0.5)
+            
+            # 若有更新的消息进来了（我的任务已经旧了），直接退出，让新任务去处理
+            if buf.last_activity > current_msg_ts:
+                logger.debug(f"[debounce] new message arrived, aborting current task uid={user_id}")
                 return
-            # 20% 概率被吵醒，回一句困然后结束
-            msg = await get_system_reply(user_id, "半夜被吵醒了，很困，请用户明天再说。")
-            await _send_and_finish(msg, user_id=user_id)
-            return
 
-        # 2. 假忙碌机制 (已移除随机触发，保留接口供未来扩展)
-        # busy_reason = _is_fake_busy(user_id)
-        # if busy_reason == "busy_ignoring":
-        #    return
-        # elif busy_reason:
-        #    await _send_and_finish(busy_reason, user_id=user_id)
-        #    return
-        
-        # ========================================================================
-        
-        # ========================================================================
-
-
-        # ✅ 尝试记住用户所在地（用户回答城市时不依赖 LLM 标签）
-        _maybe_learn_city_from_user_text(user_id, user_input)
-
-        # 1) “要链接/出处/来源”跟进：发送上一轮搜索的来源链接
-        await _handle_source_request_if_any(user_id, user_input)
-
-        # 2) 简单限流：防止刷屏
-        now = time.time()
-        if not _check_and_update_rate_limit(user_id, now):
-            return
-
-        # 3) 输入中检测：等待对方输入结束，避免打扰
-        await _wait_if_user_typing(user_id)
-
-        # 4) 图片理解：优先处理图片（或缓存等待下一条文字）
-        handled = await _handle_image_request_if_any(user_id, message, user_input, now)
-        if handled:
-            return
-
-        # 5) 时间询问：直接返回系统时间（避免模型乱编）
-        await _handle_time_request_if_any(user_id, user_input)
-
-        # 6) “总结”跟进：对上一条 ASK 的链接做总结
-        await _handle_summary_followup_if_any(user_id, user_input, now)
-
-        # 6.5) 日程提醒
-        schedule_reply = await try_handle_schedule(str(user_id), user_input)
-        if schedule_reply:
-            await _send_and_finish(schedule_reply, user_id=user_id)
-
-        # 7) URL 自动处理：LLM 判断是否要总结/确认
-        await _handle_url_auto_if_any(user_id, user_input, now)
-
-        # 7.2) 智能备忘录
-        memo_reply = await try_handle_memo(str(user_id), user_input)
-        if memo_reply:
-            await _send_and_finish(memo_reply, user_id=user_id)
+            waited = time.time() - start_wait
             
-        # 7.4) RAG 显式记忆
-        rag_reply = await _try_handle_rag_explicit(user_id, user_input)
-        if rag_reply:
-            await _send_and_finish(rag_reply, user_id=user_id)
-
-        # 7.5) 股票查询（私聊命令）
-        await _handle_stock_query_if_any(user_id, user_input)
-
-        # 8) 默认走普通聊天逻辑
-        voice_wanted = _looks_like_voice_reply_request(user_input)
-        reply = await get_ai_reply(str(user_id), user_input, voice_mode=voice_wanted)
-        if voice_wanted:
-            try:
-                mood = mood_manager.get_user_mood(str(user_id))
-                record_b64 = await synthesize_record_base64(reply, mood=mood)
-                await chat_handler.finish(MessageSegment.record(file=record_b64))
-            except FinishedException:
-                raise
-            except Exception as e:
-                logger.exception(f"[voice] tts failed(uid={user_id}) on text: {e}")
-                await _send_and_finish(reply, user_id=user_id)
-        else:
-            await _send_and_finish(reply, user_id=user_id)
-
-        # 2. 假忙碌机制 (已移除随机触发，保留接口供未来扩展)
-        # busy_reason = _is_fake_busy(user_id)
-        # if busy_reason == "busy_ignoring":
-        #    return
-        # elif busy_reason:
-        #    await _send_and_finish(busy_reason, user_id=user_id)
-        #    return
-        
-        # ========================================================================
-        
-        # ========================================================================
-
-
-        # ✅ 尝试记住用户所在地（用户回答城市时不依赖 LLM 标签）
-        _maybe_learn_city_from_user_text(user_id, user_input)
-
-        # 1) “要链接/出处/来源”跟进：发送上一轮搜索的来源链接
-        await _handle_source_request_if_any(user_id, user_input)
-
-        # 2) 简单限流：防止刷屏
-        now = time.time()
-        if not _check_and_update_rate_limit(user_id, now):
-            return
-
-        # 3) 输入中检测：等待对方输入结束，避免打扰
-        await _wait_if_user_typing(user_id)
-
-        # 4) 图片理解：优先处理图片（或缓存等待下一条文字）
-        handled = await _handle_image_request_if_any(user_id, message, user_input, now)
-        if handled:
-            return
-
-        # 5) 时间询问：直接返回系统时间（避免模型乱编）
-        await _handle_time_request_if_any(user_id, user_input)
-
-        # 6) “总结”跟进：对上一条 ASK 的链接做总结
-        await _handle_summary_followup_if_any(user_id, user_input, now)
-
-        # 6.5) 日程提醒
-        schedule_reply = await try_handle_schedule(str(user_id), user_input)
-        if schedule_reply:
-            await _send_and_finish(schedule_reply, user_id=user_id)
-
-        # 7) URL 自动处理：LLM 判断是否要总结/确认
-        await _handle_url_auto_if_any(user_id, user_input, now)
-
-        # 7.2) 智能备忘录
-        memo_reply = await try_handle_memo(str(user_id), user_input)
-        if memo_reply:
-            await _send_and_finish(memo_reply, user_id=user_id)
+            # 检查是否停止输入
+            typing = is_user_typing(user_id)
             
-        # 7.4) RAG 显式记忆
-        rag_reply = await _try_handle_rag_explicit(user_id, user_input)
-        if rag_reply:
-            await _send_and_finish(rag_reply, user_id=user_id)
+            if typing:
+                # 正在输入：虽然基础时间到了，但只要还没超 MAX，就继续等
+                if waited < TYPING_MAX_WAIT_SECONDS:
+                    continue
+                else:
+                    # 超时了，不等了，强制开始处理
+                    break
+            else:
+                # 没在输入：如果已经等够了基础防抖时间，就开工
+                if waited >= DEBOUNCE_WAIT_SECONDS:
+                    break
+        
+        # 3. Acquire Lock (确保 AI 正在说话时，新消息只能进 Buffer 排队，不能并行处理)
+        async with buf.lock:
+            # 再次检查：在等待锁的过程中，是不是已经有别的任务把它取走了？
+            # 或者是有新消息进来导致我不是最新的了？
+            # 简化逻辑：只要池子里有东西，就取出来处理。
+            # 但为了避免重复触发（比如任务A和任务B几乎同时醒来），
+            # 这里的逻辑是：谁拿到锁，谁就负责把池子清空并处理。
+            
+            user_input = buf.pop_all()
+            if not user_input:
+                return
 
-        # 7.5) 股票查询（私聊命令）
-        await _handle_stock_query_if_any(user_id, user_input)
+            logger.info(f"[chat] recv uid={user_id} merged_text={user_input[:200]!r}")
 
-        # 8) 默认走普通聊天逻辑
-        voice_wanted = _looks_like_voice_reply_request(user_input)
-        reply = await get_ai_reply(str(user_id), user_input, voice_mode=voice_wanted)
-        if voice_wanted:
-            try:
-                mood = mood_manager.get_user_mood(str(user_id))
-                record_b64 = await synthesize_record_base64(reply, mood=mood)
-                await chat_handler.finish(MessageSegment.record(file=record_b64))
-            except FinishedException:
-                raise
-            except Exception as e:
-                logger.exception(f"[voice] tts failed(uid={user_id}) on text: {e}")
+            # ✅ 一进来就记录活跃
+            touch_active(str(user_id))
+            log_user_active_hour(str(user_id))  # 记录活跃小时（用于学习用户习惯）
+
+            # ========================================================================
+            # 💀 Soul Patch: The "Void" Mechanism (生物钟与假忙碌)
+            # ========================================================================
+            
+            # 1. 睡觉机制
+            if _is_sleeping_time():
+                # 80% 概率直接装死（睡着了没听见）
+                if random.random() < 0.8:
+                    logger.info(f"[void] sleeping, ignore uid={user_id}")
+                    return
+                # 20% 概率被吵醒，回一句困然后结束
+                msg = await get_system_reply(user_id, "半夜被吵醒了，很困，请用户明天再说。")
+                await _send_and_finish(msg, user_id=user_id)
+                return
+
+            # 2. 假忙碌机制 (已移除随机触发，保留接口供未来扩展)
+            # busy_reason = _is_fake_busy(user_id)
+            # if busy_reason == "busy_ignoring":
+            #    return
+            # elif busy_reason:
+            #    await _send_and_finish(busy_reason, user_id=user_id)
+            #    return
+            
+            # ========================================================================
+            
+            # ========================================================================
+
+
+            # ✅ 尝试记住用户所在地（用户回答城市时不依赖 LLM 标签）
+            _maybe_learn_city_from_user_text(user_id, user_input)
+
+            # 1) “要链接/出处/来源”跟进：发送上一轮搜索的来源链接
+            await _handle_source_request_if_any(user_id, user_input)
+
+            now = time.time()
+            
+            # 4) 图片理解：优先处理图片（或缓存等待下一条文字）
+            handled = await _handle_image_request_if_any(user_id, message, user_input, now)
+            if handled:
+                return
+
+            # 5) 时间询问：直接返回系统时间（避免模型乱编）
+            await _handle_time_request_if_any(user_id, user_input)
+
+            # 6) “总结”跟进：对上一条 ASK 的链接做总结
+            await _handle_summary_followup_if_any(user_id, user_input, now)
+
+            # 6.5) 日程提醒
+            schedule_reply = await try_handle_schedule(str(user_id), user_input)
+            if schedule_reply:
+                await _send_and_finish(schedule_reply, user_id=user_id)
+
+            # 7) URL 自动处理：LLM 判断是否要总结/确认
+            await _handle_url_auto_if_any(user_id, user_input, now)
+
+            # 7.2) 智能备忘录
+            memo_reply = await try_handle_memo(str(user_id), user_input)
+            if memo_reply:
+                await _send_and_finish(memo_reply, user_id=user_id)
+                
+            # 7.4) RAG 显式记忆
+            rag_reply = await _try_handle_rag_explicit(user_id, user_input)
+            if rag_reply:
+                await _send_and_finish(rag_reply, user_id=user_id)
+
+            # 7.5) 股票查询（私聊命令）
+            await _handle_stock_query_if_any(user_id, user_input)
+
+            # 8) 默认走普通聊天逻辑
+            voice_wanted = _looks_like_voice_reply_request(user_input)
+            reply = await get_ai_reply(str(user_id), user_input, voice_mode=voice_wanted)
+            if voice_wanted:
+                try:
+                    mood = mood_manager.get_user_mood(str(user_id))
+                    record_b64 = await synthesize_record_base64(reply, mood=mood)
+                    await chat_handler.finish(MessageSegment.record(file=record_b64))
+                except FinishedException:
+                    raise
+                except Exception as e:
+                    logger.exception(f"[voice] tts failed(uid={user_id}) on text: {e}")
+                    await _send_and_finish(reply, user_id=user_id)
+            else:
                 await _send_and_finish(reply, user_id=user_id)
-        else:
-            await _send_and_finish(reply, user_id=user_id)
+
 
     except FinishedException:
         raise
