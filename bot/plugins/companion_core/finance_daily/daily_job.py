@@ -18,8 +18,8 @@ from nonebot import get_bots, logger, require
 require("nonebot_plugin_apscheduler")
 from nonebot_plugin_apscheduler import scheduler
 
-from ..companion_core.utils.typing_speed import typing_delay_seconds
-from ..companion_core.db import filter_active_user_ids
+from ..utils.typing_speed import typing_delay_seconds
+from ..db import filter_active_user_ids
 
 from .config import (
     FIN_DAILY_ENABLED,

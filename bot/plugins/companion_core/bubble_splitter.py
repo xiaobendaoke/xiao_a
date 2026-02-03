@@ -55,7 +55,11 @@ def _split_text_smartly(text: str) -> list[str]:
 
         # 3. ✅ 优先按语义词切分，保持语义完整
         # 构建正则：匹配 标点 或 语义词（保留分隔符）
-        break_pattern = r'([。！？!?]|(?<=真的|特别是|其实|不过|但是|而且|所以|然后|就是|感觉))'
+        # 3. ✅ 优先按语义词切分，保持语义完整
+        # 构建正则：匹配 标点 或 语义词（保留分隔符）
+        # fixed: remove variable-width lookbehind
+        pattern_words = "|".join(SEMANTIC_BREAK_WORDS)
+        break_pattern = f"([。！？!?]|{pattern_words})"
         parts = re.split(break_pattern, line)
 
         buffer = ""

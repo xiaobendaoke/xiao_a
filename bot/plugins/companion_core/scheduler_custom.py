@@ -157,7 +157,10 @@ async def check_schedules():
         try:
             instruction = f"闹钟时间到了！快提醒用户：{content}。"
             reply = await get_system_reply(str(uid), instruction)
-            await send_private_bubbles(uid, reply)
+            if reply:
+                await send_private_bubbles(uid, reply)
+            else:
+                logger.warning(f"[schedule] empty reply for id={tid}")
             update_schedule_status(tid, "done")
             logger.info(f"[schedule] triggered id={tid} uid={uid}")
         except Exception as e:

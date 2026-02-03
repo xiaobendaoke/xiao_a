@@ -23,8 +23,8 @@ from nonebot import on_message, logger
 from nonebot.adapters.onebot.v11 import PrivateMessageEvent
 from nonebot.rule import Rule
 
-from ..companion_core.utils.typing_speed import typing_delay_seconds
-from ..companion_core.db import touch_active
+from ..utils.typing_speed import typing_delay_seconds
+from ..db import touch_active
 
 from . import config
 from .pipeline import run_cn_a_daily
@@ -36,6 +36,7 @@ from .storage import (
     list_enabled_subscribers,
     set_subscription,
 )
+from ..llm_core import get_system_reply
 
 
 def _parse_manual_trigger(text: str) -> tuple[str | None, str | None, bool]:
@@ -90,7 +91,7 @@ async def handle_manual_trigger(event: PrivateMessageEvent):
 
     bot = pick_bot()
     if bot is None:
-        msg = "我这边还没连上 QQ（bot 未连接），等连接好了再试一次。"
+        msg = await get_system_reply(str(event.user_id), "告诉用户我这边还没连上QQ，等连接好了再试。")
         await asyncio.sleep(typing_delay_seconds(msg, user_id=event.user_id))
         await manual_trigger.finish(msg)
 
@@ -103,13 +104,13 @@ async def handle_manual_trigger(event: PrivateMessageEvent):
 
     if mode == "subscribe_on":
         await set_subscription(config.FIN_DAILY_MARKET, uid, enabled=True)
-        msg = "已开启"
+        msg = await get_system_reply(str(uid), "告诉用户财经日报已经开启，每天定时推送。")
         await asyncio.sleep(typing_delay_seconds(msg, user_id=uid))
         await manual_trigger.finish(msg)
 
     if mode == "subscribe_off":
         await set_subscription(config.FIN_DAILY_MARKET, uid, enabled=False)
-        msg = "已关闭"
+        msg = await get_system_reply(str(uid), "告诉用户财经日报已经关闭，不会再推送。")
         await asyncio.sleep(typing_delay_seconds(msg, user_id=uid))
         await manual_trigger.finish(msg)
 
@@ -118,7 +119,8 @@ async def handle_manual_trigger(event: PrivateMessageEvent):
         hh = int(config.FIN_DAILY_RUN_HOUR)
         mm = int(config.FIN_DAILY_RUN_MINUTE)
         st = "已开启" if enabled else "已关闭"
-        msg = f"财经日报：{st}\n推送时间：每天 {hh:02d}:{mm:02d}（按容器时区）"
+        instruction = f"告诉用户财经日报当前状态是：{st}，推送时间是每天 {hh:02d}:{mm:02d}"
+        msg = await get_system_reply(str(uid), instruction)
         await asyncio.sleep(typing_delay_seconds(msg, user_id=uid))
         await manual_trigger.finish(msg)
 
@@ -136,13 +138,15 @@ async def handle_manual_trigger(event: PrivateMessageEvent):
             )
         else:
             lines.append("- 最近任务：暂无记录")
-        msg = "\n".join(lines)
+        raw_info = "\n".join(lines)
+        instruction = f"用户想查看财经日报的调试状态，信息如下，请整理后告诉用户：\n{raw_info}"
+        msg = await get_system_reply(str(uid), instruction)
         await asyncio.sleep(typing_delay_seconds(msg, user_id=uid))
         await manual_trigger.finish(msg)
 
     # 先给一个“正在处理”的反馈，避免用户以为没反应（LLM+网络可能要几分钟）
     try:
-        warm = "好～我开始跑财经日报了，可能要两三分钟，你等我一下哈。"
+        warm = await get_system_reply(str(uid), "告诉用户财经日报开始生成了，需要等两三分钟。")
         await asyncio.sleep(typing_delay_seconds(warm, user_id=uid))
         await bot.call_api(
             "send_private_msg",
@@ -156,7 +160,7 @@ async def handle_manual_trigger(event: PrivateMessageEvent):
         res = await run_cn_a_daily(force_trade_date=trade_date, force=force)
     except Exception as e:
         logger.exception(f"[finance] manual run failed: {e}")
-        msg = f"财经日报跑失败了：{e}"
+        msg = await get_system_reply(str(uid), f"财经日报跑失败了，错误信息：{e}，请告诉用户出错了。")
         await asyncio.sleep(typing_delay_seconds(msg, user_id=uid))
         await manual_trigger.finish(msg)
 
@@ -166,7 +170,8 @@ async def handle_manual_trigger(event: PrivateMessageEvent):
         extra = ""
         if job:
             extra = f"（status={job.get('status')} err={str(job.get('error') or '')[:80]}）"
-        msg = f"这次没跑：{res.get('reason') or 'skipped'}（trade_date={td}）{extra}"
+        instruction = f"财经日报这次没有运行，原因是：{res.get('reason') or 'skipped'}（日期={td}）{extra}，请告诉用户。"
+        msg = await get_system_reply(str(uid), instruction)
         await asyncio.sleep(typing_delay_seconds(msg, user_id=uid))
         await manual_trigger.finish(msg)
 
@@ -178,11 +183,11 @@ async def handle_manual_trigger(event: PrivateMessageEvent):
         messages = [report] if report else []
 
     if not messages:
-        msg = "跑完了，但生成的内容是空的……你看下 nonebot 日志里有没有报错。"
+        msg = await get_system_reply(str(uid), "财经日报跑完了但内容是空的，请用户查看日志是否有报错。")
         await asyncio.sleep(typing_delay_seconds(msg, user_id=uid))
         await manual_trigger.finish(msg)
 
     await send_private_messages(bot, uid, messages, interval=0.6)
-    msg = "好～本次财经日报我发完啦。"
+    msg = await get_system_reply(str(uid), "告诉用户本次财经日报已经发完了。")
     await asyncio.sleep(typing_delay_seconds(msg, user_id=uid))
     await manual_trigger.finish(msg)

@@ -102,7 +102,7 @@ class MoodManager:
         """提供给 System Prompt 的强制指令（Locking）"""
         v = self.get_user_mood(user_id)
         if v < -20:
-            return "【强制】：你现在还在生气，说话要短，不要带语气词，禁止发可爱的表情/颜文字。"
+            return "【强制】：你现在还在生气，说话语气要冷淡、简短、不耐烦。不要表现得可爱，不要使用撒娇的语气词。"
         return ""
 
 mood_manager = MoodManager()

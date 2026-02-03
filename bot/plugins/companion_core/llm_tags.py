@@ -24,7 +24,7 @@ BRACKET_TAG_RE = re.compile(r"\[[^\]]+\]", re.IGNORECASE)
 
 # 清理：（旁白/动作描述）—— 中文圆括号包裹的短文本（通常是舞台指示）
 # 限制长度避免误删正常括号内容
-PAREN_ASIDE_RE = re.compile(r"（[^）]{1,20}）")
+# PAREN_ASIDE_RE 已移除：避免误删用户正常的圆括号内容（如“App（软件）”）
 
 
 def extract_tags_and_clean(raw: str) -> tuple[str, int | None, list[tuple[str, str]]]:
@@ -56,7 +56,8 @@ def extract_tags_and_clean(raw: str) -> tuple[str, int | None, list[tuple[str, s
     cleaned = BRACKET_TAG_RE.sub("", cleaned)
     
     # 移除圆括号旁白（舞台指示）
-    cleaned = PAREN_ASIDE_RE.sub("", cleaned)
+    # 移除圆括号旁白（舞台指示） -> 已禁用，防止误删
+    # cleaned = PAREN_ASIDE_RE.sub("", cleaned)
 
     lines = [re.sub(r"[ \t]+", " ", line).rstrip() for line in cleaned.splitlines()]
     clean_text = "\n".join(lines).strip()

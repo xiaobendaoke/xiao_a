@@ -90,9 +90,10 @@ async def _run_once(*, force: bool, reason: str) -> bool:
     if not items:
         # 周榜抓不到时：不标记 pushed，方便你手动重试
         if force or reason == "manual":
-            text = "我刚想给你整理一下这周的 GitHub 热榜，但我这边抓不到数据…你晚点再让我试一次好不好？"
-            await asyncio.sleep(typing_delay_seconds(text, user_id=uid))
-            await bot.call_api("send_private_msg", user_id=int(uid), message=text)
+            instruction = "GitHub周榜抓取失败（空数据）。告诉用户你刚想整理但抓不到数据，让他晚点再让你试一次。"
+            reply = await get_system_reply(uid, instruction)
+            await asyncio.sleep(typing_delay_seconds(reply, user_id=uid))
+            await bot.call_api("send_private_msg", user_id=int(uid), message=reply)
         logger.warning(f"[github_weekly] empty items week={week_key}")
         return False
 
@@ -165,11 +166,16 @@ async def handle_manual_trigger(event: PrivateMessageEvent):
     uid = str(event.user_id)
     week_key = _iso_week_key(datetime.now())
     if not force and await github_weekly_pushed(uid, week_key):
-        msg = f"这周的 GitHub 周榜我已经发过啦（{week_key}）。\n想再发一次的话你回我：github周榜 强制"
+        # msg = f"这周的 GitHub 周榜我已经发过啦（{week_key}）。\n想再发一次的话你回我：github周榜 强制"
+        instruction = f"用户请求发GitHub周榜，但本周（{week_key}）已经发过了。告诉他如果想强制重发，就回'github周榜 强制'。"
+        from .llm_core import get_system_reply
+        msg = await get_system_reply(uid, instruction)
         await asyncio.sleep(typing_delay_seconds(msg, user_id=uid))
         await manual_trigger.finish(msg)
 
-    warm = "好～我来给你整理一下这周的 GitHub 热榜。等我一下哈。"
+    # warm = "好～我来给你整理一下这周的 GitHub 热榜。等我一下哈。"
+    from .llm_core import get_system_reply
+    warm = await get_system_reply(uid, "用户手动触发了GitHub周榜。告诉他‘好～我来整理一下，等我一下哈’。")
     await asyncio.sleep(typing_delay_seconds(warm, user_id=uid))
     try:
         bot = pick_bot()
@@ -180,8 +186,10 @@ async def handle_manual_trigger(event: PrivateMessageEvent):
 
     sent = await _run_once(force=force, reason="manual")
     if not sent:
-        msg = "我刚刚这次没发出来…要不你晚点再叫我一次？"
+        # msg = "我刚刚这次没发出来…要不你晚点再叫我一次？"
+        msg = await get_system_reply(uid, "GitHub周榜手动运行失败了。委屈地告诉用户没发出来，让他晚点再叫你一次。")
         await asyncio.sleep(typing_delay_seconds(msg, user_id=uid))
         await manual_trigger.finish(msg)
 
-    await manual_trigger.finish("好～这周的 GitHub 周榜我发给你啦。")
+    msg = await get_system_reply(uid, "GitHub周榜发送成功。告诉用户发给他了。")
+    await manual_trigger.finish(msg)

@@ -90,6 +90,8 @@ async def try_handle_memo(user_id: str, user_input: str) -> str | None:
         raw_text = "\n".join(lines)
         instruction = f"用户查询备忘录，找到了以下内容，请展示给用户（不要随意删减条目）：\n{raw_text}"
         reply = await get_system_reply(user_id, instruction)
+        if not reply:
+            return None
         
         add_chat_memory(user_id, "user", text)
         add_chat_memory(user_id, "assistant", reply)

@@ -317,7 +317,8 @@ async def _handle_time_request_if_any(user_id: int, user_input: str) -> None:
         return
     now_desc = get_time_description()
     period = get_time_period()
-    await _send_and_finish(f"现在是 {now_desc}。\n大概是{period}啦。", user_id=user_id)
+    reply = await get_system_reply(user_id, f"用户问时间。告诉他现在是 {now_desc}，大概是 {period}。")
+    await _send_and_finish(reply, user_id=user_id)
 
 
 async def _handle_stock_query_if_any(user_id: int, user_input: str) -> None:
@@ -330,7 +331,9 @@ async def _handle_stock_query_if_any(user_id: int, user_input: str) -> None:
 
     sid = parse_stock_id(t)
     if sid is None:
-        await _send_and_finish("你发我一个 6 位股票代码就行啦。\n比如：查股 688110", user_id=user_id)
+        reply = await get_system_reply(user_id, "用户查股没给代码。让他发一个6位数的代码。")
+        await _send_and_finish(reply, user_id=user_id)
+        return
 
     ctx = await build_stock_context(sid)
     quote = ctx.get("quote") or {}
@@ -339,7 +342,8 @@ async def _handle_stock_query_if_any(user_id: int, user_input: str) -> None:
 
     # 兜底：行情失败时不走 LLM，直接提示
     if isinstance(quote, dict) and quote.get("error"):
-        await _send_and_finish("我刚刚去查了一下。\n但是行情接口这会儿没给到数据。\n你等我一会儿再查一次好不好？", user_id=user_id)
+        reply = await get_system_reply(user_id, "用户查股，但行情接口报错没数据。让他稍后再试。")
+        await _send_and_finish(reply, user_id=user_id)
 
     name = str((quote.get("name") or profile.get("name") or sid.code) or "").strip()
     try:
@@ -537,12 +541,14 @@ async def handle_group_hint(event):
     if not hasattr(event, "group_id"):
         return
     uid = getattr(event, "user_id", None)
-    msg = "我现在主要在私聊里陪你聊～你私聊我一句就好。"
+    msg = ""
     if uid:
         try:
             msg = await get_system_reply(str(uid), "用户在群里找你。请告诉他你现在只在私聊陪他，让他私聊你。")
         except:
-            pass
+            msg = "我现在主要在私聊里陪你聊～你私聊我一句就好。"
+    else:
+        msg = "我现在主要在私聊里陪你聊～你私聊我一句就好。"
     
     # 简单的打字模拟（这里不需要太复杂，因为是群聊）
     await asyncio.sleep(2.0) 
@@ -571,7 +577,7 @@ async def handle_private_chat(event: PrivateMessageEvent):
                 audio_path = await fetch_record_from_event(bot, record_seg)
                 asr_text = (await transcribe_audio_file(audio_path)).strip()
                 if not asr_text:
-                    msg = "我刚刚没听清…你可以再说一遍吗？"
+                    msg = await get_system_reply(user_id, "语音转文字失败了，没听清用户说什么。请用户再说一遍。")
                     await asyncio.sleep(typing_delay_seconds(msg, user_id=user_id))
                     await chat_handler.finish(msg)
 
@@ -597,7 +603,7 @@ async def handle_private_chat(event: PrivateMessageEvent):
                 raise
             except Exception as e:
                 logger.exception(f"[voice] failed uid={user_id}: {e}")
-                msg = "语音处理失败了…你发文字我也可以聊，或者稍后再试试。"
+                msg = await get_system_reply(user_id, "语音处理出错了，告诉用户可以用文字聊或者稍后再试。")
                 await asyncio.sleep(typing_delay_seconds(msg, user_id=user_id))
                 await chat_handler.finish(msg)
 
@@ -622,23 +628,19 @@ async def handle_private_chat(event: PrivateMessageEvent):
                 logger.info(f"[void] sleeping, ignore uid={user_id}")
                 return
             # 20% 概率被吵醒，回一句困然后结束
-            msg = "困死了... 明天说... 💤"
+            msg = await get_system_reply(user_id, "半夜被吵醒了，很困，请用户明天再说。")
             await _send_and_finish(msg, user_id=user_id)
             return
 
-        # 2. 假忙碌机制
-        # 只有在非命令类（不是查股/总结/日程）时才触发
-        if not (user_input.startswith(("查股", "股票", "总结", "日程", "备忘"))):
-            busy_reason = _is_fake_busy(user_id)
-            if busy_reason == "busy_ignoring":
-                # 正在忙，已读不回
-                logger.info(f"[void] fake busy (ignoring) uid={user_id}")
-                return
-            elif busy_reason:
-                # 刚触发忙碌，回一句理由然后消失
-                logger.info(f"[void] fake busy (start) uid={user_id} reason={busy_reason}")
-                await _send_and_finish(busy_reason, user_id=user_id)
-                return
+        # 2. 假忙碌机制 (已移除随机触发，保留接口供未来扩展)
+        # busy_reason = _is_fake_busy(user_id)
+        # if busy_reason == "busy_ignoring":
+        #    return
+        # elif busy_reason:
+        #    await _send_and_finish(busy_reason, user_id=user_id)
+        #    return
+        
+        # ========================================================================
         
         # ========================================================================
 
@@ -709,7 +711,7 @@ async def handle_private_chat(event: PrivateMessageEvent):
         raise
     except Exception as e:
         logger.exception(e)
-        msg = "我这边刚刚出错了…你再发一次我试试，好不好？"
+        msg_instruction = "系统刚刚报错了。请温柔地请求用户再试一次。"
         uid = locals().get("user_id", None)
         if uid:
              try:

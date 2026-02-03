@@ -251,7 +251,8 @@ async def get_ai_reply(user_id: str, user_text: str, *, voice_mode: bool = False
                 )
 
         if not clean_reply:
-            clean_reply = "唔…我刚才走神了一下，你再说一遍嘛。"
+            # 兜底回复：如果你实在什么都没生成出来
+            clean_reply = "（小a似乎在发呆，没有说话）"
 
         # 新闻/搜索模式：不主动贴链接，把来源留给用户追问时再发
         if is_news_query:
