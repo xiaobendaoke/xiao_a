@@ -32,7 +32,12 @@ async def _fetch_rsshub_feed(route: str, category: str) -> list[InfoItem]:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
             resp = await client.get(url, headers={"User-Agent": _UA, "Accept": "application/rss+xml,application/xml,*/*"})
             if resp.status_code >= 400:
-                logger.warning(f"[info_agent] rsshub feed failed {route}: status={resp.status_code}")
+                msg = f"[info_agent] rsshub feed failed {route}: status={resp.status_code}"
+                # 502/503/504 are common for RSSHub (gateway timeout), downgrade log level
+                if resp.status_code in (502, 503, 504):
+                    logger.info(msg)
+                else:
+                    logger.warning(msg)
                 return []
             
             text = resp.text or ""
@@ -54,53 +59,86 @@ def _strip_html(s: str) -> str:
 
 
 def _parse_rss_items(xml_text: str, category: str) -> list[InfoItem]:
-    """简单解析 RSS XML（不依赖 feedparser）"""
+    """健壮的 RSS/Atom 解析（优先使用标准 XML 解析，尽量避免正则解析）"""
     items: list[InfoItem] = []
-    
-    # 提取所有 <item> 或 <entry> 块
-    for block in re.split(r"<(?:item|entry)\b", xml_text, flags=re.I)[1:]:
-        block = block.split("</item>")[0].split("</entry>")[0]
-        
-        # 提取字段
-        title = ""
-        m = re.search(r"<title[^>]*>(.*?)</title>", block, flags=re.S | re.I)
-        if m:
-            title = _strip_html(m.group(1))
-        
-        link = ""
-        m = re.search(r"<link[^>]*href=[\"']([^\"']+)[\"']", block, flags=re.I)
-        if m:
-            link = m.group(1).strip()
+    if not xml_text:
+        return items
+
+    try:
+        import xml.etree.ElementTree as ET
+        root = ET.fromstring(xml_text)
+    except Exception:
+        # 解析失败，走原有的保守实现路径（返回空以避免抛错）
+        return items
+
+    def _strip(s: str | None) -> str:
+        return _strip_html(str(s)) if s is not None else ""
+
+    def _parse_date_str(dt_str: str | None) -> datetime | None:
+        if not dt_str:
+            return None
+        if isinstance(dt_str, datetime):
+            return dt_str
+        for fmt in ("%a, %d %b %Y %H:%M:%S %Z",  # RFC 1123
+                    "%a, %d %b %Y %H:%M:%S",     # RFC 2822 without TZ
+                    "%Y-%m-%dT%H:%M:%S%z",        # ISO with TZ
+                    "%Y-%m-%dT%H:%M:%S",           # ISO
+                    "%Y-%m-%d %H:%M:%S"):
+            try:
+                return datetime.strptime(dt_str[:19], fmt)
+            except Exception:
+                continue
+        return None
+
+    # Try RSS/RSS2: <rss> -> <channel> -> <item>
+    channel = root.find("channel")  # type: ignore
+    if channel is not None:
+        for item_el in channel.findall("item"):
+            title = _strip(item_el.findtext("title"))
+            link = (item_el.findtext("link") or "").strip()
+            # 常见的摘要字段
+            summary = _strip(item_el.findtext("description"))
+            if not summary:
+                summary = _strip(item_el.findtext("summary"))
+            if not summary:
+                # content:encoded 常见于 RSSHub 的扩展
+                summary = _strip(item_el.findtext("content:encoded"))
+            pub = item_el.findtext("pubDate") or item_el.findtext("published") or item_el.findtext("updated")
+            dt = _parse_date_str(pub)
+
+            if not title and not link:
+                continue
+            info = {"title": title, "link": link, "summary": summary, "published": dt or pub}
+            items.append(InfoItem.from_rss(info, category=category))
+        if items:
+            return items
+
+    # Try Atom: <feed> -> <entry>
+    for entry_el in root.findall("{http://www.w3.org/2005/Atom}entry"):
+        t = entry_el.findtext("{http://www.w3.org/2005/Atom}title")
+        title = _strip(t)
+        link = None
+        for l in entry_el.findall("{http://www.w3.org/2005/Atom}link"):
+            href = l.attrib.get("href")
+            rel = (l.attrib.get("rel") or "alternate").lower()
+            if href and rel in ("alternate", ""):
+                link = href
+                break
         if not link:
-            m = re.search(r"<link[^>]*>(.*?)</link>", block, flags=re.S | re.I)
-            if m:
-                link = _strip_html(m.group(1))
-        
-        summary = ""
-        for tag in ("description", "summary", "content"):
-            m = re.search(rf"<{tag}[^>]*>(.*?)</{tag}>", block, flags=re.S | re.I)
-            if m:
-                summary = _strip_html(m.group(1))[:500]
-                break
-        
-        pub_date = ""
-        for tag in ("pubDate", "published", "updated"):
-            m = re.search(rf"<{tag}[^>]*>(.*?)</{tag}>", block, flags=re.S | re.I)
-            if m:
-                pub_date = m.group(1).strip()
-                break
-        
+            # 兼容：某些实现把链接放在其他字段
+            link = entry_el.findtext("{http://www.w3.org/2005/Atom}link")
+        summary = entry_el.findtext("{http://www.w3.org/2005/Atom}summary")
+        if summary is None:
+            summary = entry_el.findtext("{http://www.w3.org/2005/Atom}content")
+        summary = _strip(summary)
+        pub = entry_el.findtext("{http://www.w3.org/2005/Atom}updated") or entry_el.findtext("{http://www.w3.org/2005/Atom}published")
+        dt = _parse_date_str(pub)
+
         if not title and not link:
             continue
-        
-        item = InfoItem.from_rss({
-            "title": title,
-            "link": link,
-            "summary": summary,
-            "published": pub_date,
-        }, category=category)
-        items.append(item)
-    
+        info = {"title": title or "", "link": link or "", "summary": summary or "", "published": dt or pub}
+        items.append(InfoItem.from_rss(info, category=category))
+
     return items
 
 

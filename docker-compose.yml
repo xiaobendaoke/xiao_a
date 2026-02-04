@@ -38,17 +38,16 @@ services:
       - HOST=0.0.0.0
       - PORT=8080
       - TZ=Asia/Shanghai
-    # 配置 bot 容器的代理（用于直连 FT/BBC 等 RSS，以及 LLM API）
-    - http_proxy=http://host.docker.internal:7890
-    - https_proxy=http://host.docker.internal:7890
-    # 排除内部网络，避免 RSSHub 等内网服务走代理
-    - no_proxy=localhost,127.0.0.1,rsshub,redis,napcat
+      # 配置 bot 容器的代理（用于直连 FT/BBC 等 RSS，以及 LLM API）
+      - http_proxy=http://host.docker.internal:7890
+      - https_proxy=http://host.docker.internal:7890
+      # 排除内部网络，避免 RSSHub 等内网服务走代理
+      - no_proxy=localhost,127.0.0.1,rsshub,redis,napcat
     ports:
       - "8080:8080"
     command: ["python", "bot.py"]
     restart: unless-stopped
-    
-    
+
     # 语音已切到 DashScope（ASR/TTS），不再依赖 GPT-SoVITS
 
   # === RSSHub 信息聚合服务 ===

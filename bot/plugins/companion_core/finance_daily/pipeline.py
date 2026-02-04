@@ -374,6 +374,11 @@ async def run_cn_a_daily(*, force_trade_date: str | None = None, force: bool = F
     try:
         try:
             sel = await _prepare_selection(provider, trade_date)
+        except RuntimeError as e:
+            if "empty_daily" in str(e):
+                logger.warning(f"[finance] no data for {trade_date}, skipping job.")
+                return {"skipped": True, "reason": "empty_daily", "trade_date": trade_date}
+            raise
         except Exception as e:
             # Eastmoney push2 在部分环境下会频繁断连；自动切换到 Sina 行情快照，保证任务可产出
             if getattr(provider, "name", "") == "eastmoney" and (

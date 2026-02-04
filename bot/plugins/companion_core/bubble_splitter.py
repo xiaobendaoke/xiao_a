@@ -1,4 +1,11 @@
-# bot/plugins/companion_core/bubble_splitter.py
+"""消息气泡分段（Bubble Splitter）。
+
+负责将长文本切分为多个短气泡，模拟真人聊天的节奏。
+策略：
+- 优先按换行符切分。
+- 按标点符号（。！？）切分。
+- 按语义起始词（如“但是”、“感觉”）进行切分。
+"""
 
 from __future__ import annotations
 import re
@@ -69,12 +76,18 @@ def _split_text_smartly(text: str) -> list[str]:
             if not p:
                 continue
 
-            # 如果是标点或语义词，附在上一句末尾并结束当前气泡
-            if p in "。！？!?" or p in SEMANTIC_BREAK_WORDS:
+            # 如果是标点，附在上一句末尾并结束当前气泡
+            if p in "。！？!?":
                 buffer += p
                 if buffer.strip():
                     current_chunk_bubbles.append(buffer.strip())
                 buffer = ""
+            # ✅ 如果是语义词（如“感觉”/“但是”），且 buffer 已经有内容，
+            # 则先把 buffer 结清，然后把语义词作为新句子的开头。
+            elif p in SEMANTIC_BREAK_WORDS:
+                if buffer.strip():
+                    current_chunk_bubbles.append(buffer.strip())
+                buffer = p
             else:
                 buffer += p
 
