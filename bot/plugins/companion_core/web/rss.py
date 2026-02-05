@@ -182,10 +182,12 @@ async def fetch_feeds(feed_urls: List[str], limit_each: int = 8) -> List[Dict[st
 # 你的RSSHub订阅源（建议选一些有趣的、非硬核新闻的）
 # 比如：少数派、机核网、热门推特搬运、V2EX等
 RSS_SOURCES = [
-    "https://rsshub.app/36kr/newsflashes",       # 36氪快讯
-    "https://rsshub.app/sspai/index",             # 少数派
-    "https://rsshub.app/douban/movie/playing",    # 豆瓣正在上映
-    "https://rsshub.app/aggr/hot_news",           # 聚合热榜
+    # "https://rsshub.app/36kr/newsflashes",       # [REMOVED]
+    # "https://rsshub.app/sspai/index",             # [REMOVED]
+    # "https://rsshub.app/douban/movie/playing",    # [REMOVED]
+    # "https://rsshub.app/aggr/hot_news",           # [REMOVED]
+    "https://www.36kr.com/feed",                    # 替换为直连源
+    "https://sspai.com/feed",
 ]
 
 async def get_random_recommendation() -> dict[str, str] | None:

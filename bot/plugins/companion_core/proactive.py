@@ -25,6 +25,7 @@ from nonebot import get_bot, logger
 from nonebot.adapters.onebot.v11 import Bot
 from nonebot_plugin_apscheduler import scheduler
 
+from .bubble_splitter import bubble_parts
 from .db import (
     ProactiveCandidate,
     claim_proactive_slot,
@@ -53,7 +54,7 @@ PROACTIVE_COOLDOWN_MINUTES = _env_int("PROACTIVE_COOLDOWN_MINUTES", 240)
 
 
 async def _send_bubbles(bot: Bot, user_id: int, text: str) -> None:
-    parts = [p.strip() for p in (text or "").splitlines() if p.strip()]
+    parts = bubble_parts(text)
     if not parts:
         return
     if len(parts) > 4:

@@ -47,59 +47,94 @@ def bubble_parts(text: str) -> list[str]:
 
 
 def _split_text_smartly(text: str) -> list[str]:
-    """核心切分逻辑"""
+    """核心切分逻辑（基于深度的边界分割，避免颜文字中的标点被误分割）"""
     # 1. 先按物理换行符切分 (Explicit Newline)
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     lines = [line.strip() for line in text.split("\n") if line.strip()]
 
-    final_bubbles = []
+    final_bubbles: list[str] = []
 
     for line in lines:
-        # 2. 如果这行本身就不长，直接作为一条
-        if len(line) < 12:  # ✅ 阈值从20降到12
-            final_bubbles.append(line)
-            continue
-
-        # 3. ✅ 优先按语义词切分，保持语义完整
-        # 构建正则：匹配 标点 或 语义词（保留分隔符）
-        # 3. ✅ 优先按语义词切分，保持语义完整
-        # 构建正则：匹配 标点 或 语义词（保留分隔符）
-        # fixed: remove variable-width lookbehind
-        pattern_words = "|".join(SEMANTIC_BREAK_WORDS)
-        break_pattern = f"([。！？!?]|{pattern_words})"
-        parts = re.split(break_pattern, line)
-
-        buffer = ""
-        current_chunk_bubbles = []
-
-        for p in parts:
-            if not p:
+        # 将单行文本按深度分割成若干条，避免括号内的标点触发分割
+        segments = _split_line_by_depth(line)
+        for seg in segments:
+            if not seg:
+                continue
+            # 2. 如果这段文本本身就不长，直接作为一条
+            if len(seg) < 12:  # ✅ 阈值从20降到12
+                final_bubbles.append(seg)
                 continue
 
-            # 如果是标点，附在上一句末尾并结束当前气泡
-            if p in "。！？!?":
-                buffer += p
-                if buffer.strip():
-                    current_chunk_bubbles.append(buffer.strip())
-                buffer = ""
-            # ✅ 如果是语义词（如“感觉”/“但是”），且 buffer 已经有内容，
-            # 则先把 buffer 结清，然后把语义词作为新句子的开头。
-            elif p in SEMANTIC_BREAK_WORDS:
-                if buffer.strip():
-                    current_chunk_bubbles.append(buffer.strip())
-                buffer = p
-            else:
-                buffer += p
+            # 3. ✅ 优先按语义词切分，保持语义完整
+            pattern_words = "|".join(SEMANTIC_BREAK_WORDS)
+            break_pattern = f"([。！？!?]|{pattern_words})"
+            parts = re.split(break_pattern, seg)
 
-        # 处理末尾残留
-        if buffer.strip():
-            current_chunk_bubbles.append(buffer.strip())
+            buffer = ""
+            current_chunk_bubbles = []
 
-        # 4. 如果切分后还是太长，再尝试二次切分
-        for bubble in current_chunk_bubbles:
-            final_bubbles.extend(_try_split_by_space_or_comma(bubble))
+            for p in parts:
+                if not p:
+                    continue
+
+                # 如果是标点，附在上一句末尾并结束当前气泡
+                if p in "。！？!?":
+                    # 如果当前缓冲区内有未闭合的括号，则不把该标点作为分割点，以避免破坏颜文字/表情中的符号
+                    if buffer.count("(") > buffer.count(")") or buffer.count("（") > buffer.count("）"):
+                        buffer += p
+                        continue
+                    buffer += p
+                    if buffer.strip():
+                        current_chunk_bubbles.append(buffer.strip())
+                    buffer = ""
+                # ✅ 如果是语义词（如“感觉”/“但是”），且 buffer 已经有内容，
+                # 则先把 buffer 结清，然后把语义词作为新句子的开头。
+                elif p in SEMANTIC_BREAK_WORDS:
+                    if buffer.strip():
+                        current_chunk_bubbles.append(buffer.strip())
+                    buffer = p
+                else:
+                    buffer += p
+
+            # 处理末尾残留
+            if buffer.strip():
+                current_chunk_bubbles.append(buffer.strip())
+
+            # 4. 如果切分后还是太长，再尝试二次切分
+            for bubble in current_chunk_bubbles:
+                final_bubbles.extend(_try_split_by_space_or_comma(bubble))
 
     return final_bubbles
+
+
+def _split_line_by_depth(line: str) -> list[str]:
+    """基于括号深度的分割：遇到标点在深度为0时才分割，否则作为文本的一部分"""
+    depth = 0
+    buf: list[str] = []
+    res: list[str] = []
+    for ch in line:
+        if ch in "(（":
+            depth += 1
+            buf.append(ch)
+            continue
+        if ch in ")）":
+            if depth > 0:
+                depth -= 1
+            buf.append(ch)
+            continue
+        if ch in "。！？!?" and depth == 0:
+            # 作为一个分割点，完成当前文本段，并把标点也保留在上一段
+            if buf:
+                res.append("".join(buf).strip() + ch)
+                buf = []
+            else:
+                # 如果标点前没有文本，跳过该标点
+                pass
+            continue
+        buf.append(ch)
+    if buf:
+        res.append("".join(buf).strip())
+    return [r for r in res if r]
 
 
 def _try_split_by_space_or_comma(text: str) -> list[str]:

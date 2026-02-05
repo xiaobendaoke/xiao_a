@@ -7,7 +7,7 @@ services:
       - NAPCAT_GID=${NAPCAT_GID:-1000}
       - TZ=Asia/Shanghai
     ports:
-      - "6099:6099"   # NapCat WebUI
+      - "6099:6099"
       - "3000:3000"
       - "3001:3001"
     volumes:
@@ -15,7 +15,7 @@ services:
       - ./napcat/qq:/app/.config/QQ
       - ./napcat/config:/app/napcat/config
     restart: unless-stopped
-  
+
   nonebot:
     image: ${NONEBOT_IMAGE:-qqbot-nonebot:local}
     build:
@@ -25,10 +25,8 @@ services:
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - ./bot:/app
-      # 记忆/状态数据库（SQLite），单独挂载保证容器重建不丢
       - ./bot/plugins/companion_core/data.db:/app/plugins/companion_core/data.db
     extra_hosts:
-      # 让容器能访问宿主机代理（Linux 下默认没有 host.docker.internal）
       - "host.docker.internal:host-gateway"
     env_file:
       - ./bot/.env
@@ -38,49 +36,70 @@ services:
       - HOST=0.0.0.0
       - PORT=8080
       - TZ=Asia/Shanghai
-      # 配置 bot 容器的代理（用于直连 FT/BBC 等 RSS，以及 LLM API）
       - http_proxy=http://host.docker.internal:7890
       - https_proxy=http://host.docker.internal:7890
-      # 排除内部网络，避免 RSSHub 等内网服务走代理
       - no_proxy=localhost,127.0.0.1,rsshub,redis,napcat
     ports:
       - "8080:8080"
     command: ["python", "bot.py"]
     restart: unless-stopped
 
-    # 语音已切到 DashScope（ASR/TTS），不再依赖 GPT-SoVITS
-
   # === RSSHub 信息聚合服务 ===
   rsshub:
-    image: diygod/rsshub:latest
-    container_name: rsshub
-    restart: unless-stopped
+    image: diygod/rsshub
+    restart: always
     ports:
-      - "1200:1200"
+      - '1200:1200'
     environment:
-      - NODE_ENV=production
-      - CACHE_TYPE=redis
-      - REDIS_URL=redis://redis:6379/
-      - CACHE_EXPIRE=600
-      - TZ=Asia/Shanghai
-      # 配置代理访问国外源（如 BBC/Reuters）
-      - PROXY_URI=http://host.docker.internal:7890
-      # 防止国内源走代理变慢（可选，根据需要调整）
-      # - PROXY_URL_REGEX=.*(github|bbc|reuters|hackernews|v2ex|solidot).*
-      # 需要 Cookie 的源
-      - WEIBO_COOKIES=${WEIBO_COOKIES}
-      - ZHIHU_COOKIES=${ZHIHU_COOKIES}
+      NODE_ENV: production
+      CACHE_TYPE: redis
+      REDIS_URL: 'redis://redis:6379/'
+      PUPPETEER_WS_ENDPOINT: 'ws://browserless:3000'
+      PUPPETEER_REAL_BROWSER_SERVICE: 'http://real-browser:3000'
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://localhost:1200/healthz']
+      interval: 30s
+      timeout: 10s
+      retries: 3
     depends_on:
       - redis
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - browserless
+
+  real-browser:
+    image: ghcr.io/hyoban/puppeteer-real-browser-hono
+    restart: always
+    ports:
+      - '3002:3000'
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://localhost:3000']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  browserless:
+    image: browserless/chrome
+    restart: always
+    ulimits:
+      core:
+        hard: 0
+        soft: 0
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://localhost:3000/pressure']
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   redis:
     image: redis:alpine
-    container_name: rsshub-redis
-    restart: unless-stopped
+    restart: always
     volumes:
       - redis-data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 5s
 
 volumes:
   redis-data:

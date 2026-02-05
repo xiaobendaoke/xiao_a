@@ -21,32 +21,8 @@ _UA = "Mozilla/5.0 (compatible; xiao-a-bot/1.0)"
 
 
 async def _fetch_rsshub_feed(route: str, category: str) -> list[InfoItem]:
-    """从 RSSHub 拉取单个 feed"""
-    if not config.RSSHUB_BASE:
-        return []
-    
-    url = f"{config.RSSHUB_BASE}{route}"
-    timeout = httpx.Timeout(10.0, connect=5.0)
-    
-    try:
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-            resp = await client.get(url, headers={"User-Agent": _UA, "Accept": "application/rss+xml,application/xml,*/*"})
-            if resp.status_code >= 400:
-                msg = f"[info_agent] rsshub feed failed {route}: status={resp.status_code}"
-                # 502/503/504 are common for RSSHub (gateway timeout), downgrade log level
-                if resp.status_code in (502, 503, 504):
-                    logger.info(msg)
-                else:
-                    logger.warning(msg)
-                return []
-            
-            text = resp.text or ""
-            items = _parse_rss_items(text, category)
-            logger.debug(f"[info_agent] fetched {len(items)} items from {route}")
-            return items
-    except Exception as e:
-        logger.warning(f"[info_agent] rsshub feed failed {route}: {e}")
-        return []
+    """[DEPRECATED] RSSHub 已移除，返回空。"""
+    return []
 
 
 def _strip_html(s: str) -> str:
@@ -143,28 +119,8 @@ def _parse_rss_items(xml_text: str, category: str) -> list[InfoItem]:
 
 
 async def fetch_all_rsshub_feeds() -> list[InfoItem]:
-    """并发拉取所有 RSSHub 源"""
-    if not config.RSSHUB_BASE:
-        logger.info("[info_agent] RSSHUB_BASE not configured, skipping")
-        return []
-    
-    all_feeds = config.get_all_feeds()
-    tasks = []
-    for category, routes in all_feeds.items():
-        for route in routes:
-            tasks.append(_fetch_rsshub_feed(route, category))
-    
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    
-    items: list[InfoItem] = []
-    for r in results:
-        if isinstance(r, Exception):
-            logger.warning(f"[info_agent] feed exception: {r}")
-            continue
-        items.extend(r or [])
-    
-    logger.info(f"[info_agent] fetched total {len(items)} items from RSSHub")
-    return items
+    """[DEPRECATED] RSSHub 已移除，返回空。"""
+    return []
 
 
 async def fetch_github_trending() -> list[InfoItem]:
@@ -243,4 +199,3 @@ async def fetch_all_sources() -> list[InfoItem]:
         items.extend(r or [])
     
     return items
-
