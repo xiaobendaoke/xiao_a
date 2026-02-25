@@ -1,3 +1,9 @@
+"""Finance Daily 配置。
+
+定义财经日报的各项环境配置。
+"""
+
+from __future__ import annotations
 
 import os
 

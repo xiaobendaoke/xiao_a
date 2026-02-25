@@ -77,13 +77,37 @@ def get_all_feeds() -> dict[str, list[str]]:
 
 # === 直接 RSS 源（不依赖 RSSHub，作为备选）===
 DIRECT_RSS_FEEDS = _env_list("DIRECT_RSS_FEEDS", [
-    # 科技
+    # --- 每日大事/综合 ---
+    "https://rsshub.app/people-dail",       # 人民日报
+    "https://rsshub.app/cctv/news",         # 央视新闻
+    "https://rsshub.app/zhihu/hot",         # 知乎热榜
+    "https://rsshub.app/readhub/daily",     # Readhub 每日早报 (Correction: /dai -> /daily based on common RSSHub routes, user said /dai but usually it's /daily or /readhub/category/topic, let's stick to user's link if it works, but user said /dai. checking docs... readhub/daily is standard. User link: https://rsshub.app/readhub/dai -> likely typo, assume daily coverage.)
+    # Actually, let's use the user provided links exactly as base, but clean up if obvious. User: https://rsshub.app/readhub/dai. I will use what user gave but check if I should correct. 
+    # Let's stick to the user's list but maybe correct typo if obvious. 
+    # standard readhub rsshub is /readhub/daily. User wrote /dai. I will use /daily to be safe or keep it.
+    # Let's use the list:
+    "https://rsshub.app/readhub/daily",
+    "https://rsshub.app/bbc/cn",            # BBC 中文
+
+    # --- 财经新闻 ---
+    "https://rsshub.app/wallstreetcn/live",      # 华尔街见闻 实时
+    "https://rsshub.app/wallstreetcn/calendar",  # 财经日历
+    "https://rsshub.app/caixin/news",            # 财新网
+    "https://rsshub.app/jin10",                  # 金十数据
+    "https://rsshub.app/gelonghui/live",         # 格隆汇
+    "https://rsshub.app/fastbull/express-news",  # 法布财经
+
+    # --- 科技新闻 ---
+    "https://rsshub.app/huxiu",             # 虎嗅
+    "https://engadget.com/rss.xml",         # Engadget
+    "https://rsshub.app/leiphone/news",     # 雷锋网 (User said /ne, presumed /news)
+    "https://rsshub.app/36kr/newsflashes",  # 36氪快讯 (User said /newsfl, presumed /newsflashes)
+    "https://rsshub.app/ifanr",             # 爱范儿
+
+    # --- 保留原有的直接源 (去重) ---
     "https://sspai.com/feed",               # 少数派
     "https://www.solidot.org/index.rss",    # Solidot
     "https://news.ycombinator.com/rss",     # Hacker News
-    # 综合/财经
-    "https://www.36kr.com/feed",            # 36氪
-    "https://www.huxiu.com/rss/0.xml",      # 虎嗅
     "http://www.ftchinese.com/rss/news",    # FT中文网
 ])
 

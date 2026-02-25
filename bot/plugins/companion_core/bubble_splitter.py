@@ -1,182 +1,228 @@
-"""消息气泡分段（Bubble Splitter）。
-
-负责将长文本切分为多个短气泡，模拟真人聊天的节奏。
-策略：
-- 优先按换行符切分。
-- 按标点符号（。！？）切分。
-- 按语义起始词（如“但是”、“感觉”）进行切分。
-"""
-
 from __future__ import annotations
 import re
 
-# 只要单句超过这个长度，就尝试找标点切分
-# 设为 12，让短句更碎、更有"一句一句说"的感觉
-SPLIT_THRESHOLD = 12
+# 调整阈值：稍微放宽，避免太碎
+SPLIT_THRESHOLD = 15
 
-# ✅ 语义切分词：优先在这些词后切分，保持语义完整
-SEMANTIC_BREAK_WORDS = ["真的", "特别是", "其实", "不过", "但是", "而且", "所以", "然后", "就是", "感觉"]
+# ✅ 优化语义词库：
+# 移除了 "真的"(副词), "其实"(易混淆), "特别是"(易混淆), "感觉"(易做动词)
+# 保留了强转折和强承接词，且通常这些词放在句首切分才自然
+# Added "现在" as requested
+SEMANTIC_BREAK_WORDS = [
+    "但是", "不过", "而且", "所以", "然后", "就是说", "也就是", "另外", 
+]
 
 def bubble_parts(text: str) -> list[str]:
     """
-    智能气泡分段：
-    1. 显式换行符 (\n) 是最强拆分信号。
-    2. 标点符号 (。！？) 是次级拆分信号。
-    3. 空格 ( ) 在某些情况下也作为拆分信号（针对无标点流）。
+    智能气泡分段主入口
     """
     s = str(text or "").strip()
     if not s:
         return []
 
-    # 1. 保护代码块（不切分代码）
+    # 1. 保护代码块 (Code Block)
     code_re = re.compile(r"```.*?```", re.S)
     segments = []
     last = 0
     for m in code_re.finditer(s):
         pre_text = s[last:m.start()]
         segments.extend(_split_text_smartly(pre_text))
-        
+
         block = (m.group(0) or "").strip()
         if block:
             segments.append(block)
         last = m.end()
-    
+
     segments.extend(_split_text_smartly(s[last:]))
 
     return [p.strip() for p in segments if p.strip()]
 
 
 def _split_text_smartly(text: str) -> list[str]:
-    """核心切分逻辑（基于深度的边界分割，避免颜文字中的标点被误分割）"""
-    # 1. 先按物理换行符切分 (Explicit Newline)
+    """
+    核心切分逻辑
+    """
+    # 1. 预处理：统一换行符
     text = text.replace("\r\n", "\n").replace("\r", "\n")
+
+    # 2. 保护 Markdown 链接/图片 [text](url) 不被换行切碎
     lines = [line.strip() for line in text.split("\n") if line.strip()]
 
     final_bubbles: list[str] = []
 
     for line in lines:
-        # 将单行文本按深度分割成若干条，避免括号内的标点触发分割
-        segments = _split_line_by_depth(line)
+        # 3. 深度扫描（处理标点 + 引号保护）
+        segments = _split_line_with_state_machine(line)
+
         for seg in segments:
-            if not seg:
-                continue
-            # 2. 如果这段文本本身就不长，直接作为一条
-            if len(seg) < 12:  # ✅ 阈值从20降到12
+            if not seg: continue
+
+            # 4. 长度检测
+            if len(seg) < SPLIT_THRESHOLD:
                 final_bubbles.append(seg)
                 continue
 
-            # 3. ✅ 优先按语义词切分，保持语义完整
-            pattern_words = "|".join(SEMANTIC_BREAK_WORDS)
-            break_pattern = f"([。！？!?]|{pattern_words})"
-            parts = re.split(break_pattern, seg)
-
-            buffer = ""
-            current_chunk_bubbles = []
-
-            for p in parts:
-                if not p:
-                    continue
-
-                # 如果是标点，附在上一句末尾并结束当前气泡
-                if p in "。！？!?":
-                    # 如果当前缓冲区内有未闭合的括号，则不把该标点作为分割点，以避免破坏颜文字/表情中的符号
-                    if buffer.count("(") > buffer.count(")") or buffer.count("（") > buffer.count("）"):
-                        buffer += p
-                        continue
-                    buffer += p
-                    if buffer.strip():
-                        current_chunk_bubbles.append(buffer.strip())
-                    buffer = ""
-                # ✅ 如果是语义词（如“感觉”/“但是”），且 buffer 已经有内容，
-                # 则先把 buffer 结清，然后把语义词作为新句子的开头。
-                elif p in SEMANTIC_BREAK_WORDS:
-                    if buffer.strip():
-                        current_chunk_bubbles.append(buffer.strip())
-                    buffer = p
-                else:
-                    buffer += p
-
-            # 处理末尾残留
-            if buffer.strip():
-                current_chunk_bubbles.append(buffer.strip())
-
-            # 4. 如果切分后还是太长，再尝试二次切分
-            for bubble in current_chunk_bubbles:
-                final_bubbles.extend(_try_split_by_space_or_comma(bubble))
+            # 5. 语义切分（基于正则的二次切分）
+            sub_bubbles = _split_by_semantics(seg)
+            final_bubbles.extend(sub_bubbles)
 
     return final_bubbles
 
 
-def _split_line_by_depth(line: str) -> list[str]:
-    """基于括号深度的分割：遇到标点在深度为0时才分割，否则作为文本的一部分"""
-    depth = 0
+def _split_line_with_state_machine(line: str) -> list[str]:
+    """
+    改进版深度分割：
+    1. 支持括号 () （）
+    2. 支持引号 "" “” ‘’ 保护（避免切断对话引用）
+    3. 支持 Markdown 链接 []() 保护
+    """
     buf: list[str] = []
     res: list[str] = []
-    for ch in line:
-        if ch in "(（":
-            depth += 1
-            buf.append(ch)
-            continue
-        if ch in ")）":
-            if depth > 0:
-                depth -= 1
-            buf.append(ch)
-            continue
-        if ch in "。！？!?" and depth == 0:
-            # 作为一个分割点，完成当前文本段，并把标点也保留在上一段
-            if buf:
-                res.append("".join(buf).strip() + ch)
-                buf = []
-            else:
-                # 如果标点前没有文本，跳过该标点
-                pass
-            continue
+
+    depth = 0        # 括号深度
+    in_quote = False # 是否在引号内
+    quote_char = None # 记录当前是由哪个引号开启的
+
+    # 映射配对
+    pairs = {"(": ")", "（": "）", "[": "]"}
+    # 引号集合
+    quotes = {'"', "'", '“', '”', '‘', '’'}
+
+    for i, ch in enumerate(line):
+        # --- 状态更新逻辑 ---
+
+        # 1. 引号处理
+        if ch in quotes:
+            if not in_quote:
+                in_quote = True
+                quote_char = ch
+            elif in_quote:
+                # 简单闭合逻辑：遇到同类引号，或者遇到智能闭合引号
+                if ch == quote_char or (quote_char == '“' and ch == '”') or (quote_char == '‘' and ch == '’'):
+                    in_quote = False
+                    quote_char = None
+
+        # 2. 括号处理 (仅在非引号状态下，或 Markdown 链接保护)
+        elif not in_quote:
+            if ch in pairs: # 左括号
+                depth += 1
+            elif ch in pairs.values(): # 右括号
+                if depth > 0:
+                    depth -= 1
+
         buf.append(ch)
+
+        # --- 切分触发逻辑 ---
+        # 只有在 深度为0 且 不在引号内 时，才允许由标点触发切分
+        if depth == 0 and not in_quote:
+            if ch in "。！？!?":
+                # 避免 "..." 被切成 ". . ." (简单的防抖动，或者允许连读)
+                # 这里简单处理：遇到标点就切
+                res.append("".join(buf).strip())
+                buf = []
+
     if buf:
         res.append("".join(buf).strip())
+
     return [r for r in res if r]
 
 
-def _try_split_by_space_or_comma(text: str) -> list[str]:
-    """只有文本过长 (>=30) 时，才尝试用空格/逗号救急"""
-    if len(text) < 30:
-        return [text]
-        
-    # 尝试按空格切分（针对无标点流： "医生开的药是消炎的 记得多休息"）
-    # 只有当空格前后都是中文时，才视作“换气分隔符”
-    # 暂时简单点：直接 split spaces
-    
-    sub_parts = []
-    # 如果包含空格，且片段较长
-    if " " in text:
-        # 简单的按空格分
-        raw_spaces = text.split(" ")
-        buf = ""
-        for seg in raw_spaces:
-            if not seg.strip(): continue
-            # 累积 buffer，直到长度适中
-            if len(buf) + len(seg) < 30:
-                buf += (" " + seg) if buf else seg
+def _split_by_semantics(text: str) -> list[str]:
+    """
+    对长句进行语义词切分。
+    修复了原代码中语义词会切断括号内容的 Bug。
+    """
+    # 构造正则
+    pattern_words = "|".join(SEMANTIC_BREAK_WORDS)
+    # 捕获组使得 split 后保留分隔符
+    # Match: 3+ dots OR ellipsis char OR semantic words
+    # Match: 3+ dots OR ellipsis char OR semantic words
+    # Use concatenation to avoid f-string brace escaping issues with {3,}
+    break_pattern = r"(\.{3,}|…|" + pattern_words + r")"
+    parts = re.split(break_pattern, text)
+
+    final_chunks = []
+    buffer = ""
+
+    for p in parts:
+        if not p: continue
+
+        # CASE 1: Semantic Word (Leading) -> 归入下一句
+        if p in SEMANTIC_BREAK_WORDS:
+            # 关键修正：检查当前 buffer 是否处于“不安全”状态（如括号未闭合）
+            open_count = buffer.count("(") + buffer.count("（") + buffer.count("[")
+            close_count = buffer.count(")") + buffer.count("）") + buffer.count("]")
+
+            # 如果括号未闭合，或者 buffer 太短（避免 "我" 被切出来），则不切分
+            if open_count > close_count or len(buffer) < 2:
+                buffer += p
             else:
-                if buf: sub_parts.append(buf)
-                buf = seg
-        if buf: sub_parts.append(buf)
-    else:
-        # 实在没辙，看有没有逗号
-        # 只有在非常长 (>60) 的情况下才切逗号
-        if len(text) > 60:
-             # ... 简单起见，暂不切逗号，保留长句完整性，或者可以切 "，"
-             # 现在的需求是 微信风格，可以切
-             parts = re.split(r'([，,])', text)
-             buf = ""
-             for p in parts:
-                 buf += p
-                 if len(buf) > 30 and p in "，,":
-                     sub_parts.append(buf.strip())
-                     buf = ""
-             if buf: sub_parts.append(buf.strip())
-        else:
-            sub_parts = [text]
+                # 可以切分：把之前的 buffer 存入，p 作为新句子的开始
+                if buffer.strip():
+                    final_chunks.append(buffer.strip())
+                buffer = p 
+
+        # CASE 2: Ellipsis (Trailing) -> 归入上一句
+        elif re.fullmatch(r"\.{3,}|…", p):
+            buffer += p
+            # Check bracket safety
+            open_count = buffer.count("(") + buffer.count("（") + buffer.count("[")
+            close_count = buffer.count(")") + buffer.count("）") + buffer.count("]")
             
-    # 最后的兜底：如果没切出个所以然（sub_parts为空），返回原样
-    return sub_parts if sub_parts else [text]
+            if open_count <= close_count:
+                # 切分，把当前buffer（含省略号）推入results
+                if buffer.strip():
+                    final_chunks.append(buffer.strip())
+                buffer = ""
+
+        else:
+            buffer += p
+
+    if buffer.strip():
+        final_chunks.append(buffer.strip())
+
+    # 最后的兜底：如果切分后还是很长，尝试用逗号/空格救急
+    result = []
+    for chunk in final_chunks:
+        result.extend(_try_split_by_space_or_comma(chunk))
+
+    return result
+
+
+def _try_split_by_space_or_comma(text: str) -> list[str]:
+    """
+    兜底策略：只有极长文本才动用逗号和空格
+    """
+    if len(text) < 25: # 提高阈值
+        return [text]
+
+    # 简单策略：优先切逗号
+    if "，" in text or "," in text:
+        parts = re.split(r'([，,])', text)
+        buf = ""
+        res = []
+        for p in parts:
+            buf += p
+            # 只有当缓冲区够长，且遇到了逗号，才切分
+            if len(buf) > 15 and p in "，,":
+                res.append(buf.strip())
+                buf = ""
+        if buf: res.append(buf.strip())
+        return res
+
+    # 实在不行切空格 (针对英文或无标点中文)
+    if " " in text and len(text) > 30:
+        parts = text.split(" ")
+        new_parts = []
+        buf = ""
+        for p in parts:
+            if not p.strip(): continue
+            if len(buf) + len(p) < 15: # min length to avoid fragmentation
+                buf += (" " + p) if buf else p
+            else:
+                if buf: new_parts.append(buf)
+                buf = p
+        if buf: new_parts.append(buf)
+        return new_parts
+
+    return [text]

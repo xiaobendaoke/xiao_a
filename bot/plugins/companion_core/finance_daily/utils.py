@@ -1,3 +1,9 @@
+"""Finance Daily 工具函数。
+
+包含哈希等通用工具。
+"""
+
+from __future__ import annotations
 
 import hashlib
 

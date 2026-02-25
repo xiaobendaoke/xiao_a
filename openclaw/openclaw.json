@@ -1,0 +1,50 @@
+{
+  "$schema": "https://raw.githubusercontent.com/openclaw/openclaw/main/openclaw.schema.json",
+  "gateway": {
+    "bind": "lan",
+    "port": 18789,
+    "auth": {
+      "mode": "token"
+    },
+    "http": {
+      "endpoints": {
+        "chatCompletions": {
+          "enabled": true
+        },
+        "responses": {
+          "enabled": true
+        }
+      }
+    }
+  },
+  "tools": {
+    "@openclaw/web-search/brave": {
+      "enabled": false
+    },
+    "@openclaw/fetch": {
+      "enabled": true
+    }
+  },
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "deepseek": {
+        "baseUrl": "https://api.deepseek.com/v1",
+        "apiKey": "${DEEPSEEK_API_KEY}",
+        "api": "openai-completions",
+        "models": [
+          { "id": "deepseek-chat", "name": "DeepSeek Chat" },
+          { "id": "deepseek-reasoner", "name": "DeepSeek Reasoner" }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "main": {
+      "name": "main",
+      "description": "XiaoA external capability sidecar",
+      "model": "deepseek/deepseek-chat",
+      "temperature": 0.2
+    }
+  }
+}

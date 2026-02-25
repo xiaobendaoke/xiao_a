@@ -10,6 +10,8 @@
 - 用户追问：主动搜索相关信息
 """
 
+from __future__ import annotations
+
 from nonebot.plugin import PluginMetadata
 
 from . import scheduler  # noqa: F401  # 导入即注册定时任务

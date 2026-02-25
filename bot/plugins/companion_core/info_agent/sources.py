@@ -141,10 +141,30 @@ async def _fetch_direct_rss(url: str) -> list[InfoItem]:
     
     # 根据 URL 推断分类
     category = "tech"  # 默认
-    if any(kw in url.lower() for kw in ["finance", "ft", "wallstreet", "36kr", "huxiu"]):
+    url_lower = url.lower()
+    
+    # 财经类
+    finance_keywords = [
+        "finance", "ft", "wallstreet", 
+        "jin10", "gelonghui", "fastbull", "caixin", "eastmoney"
+    ]
+    # 世界/热点类
+    world_keywords = [
+        "bbc", "reuters", "nytimes", "people-dail", "cctv", 
+        "zhihu", "weibo", "readhub"
+    ]
+    # 科技类
+    tech_keywords = [
+        "engadget", "leiphone", "ifanr", "sspai", "solidot", "hackernews",
+        "36kr", "huxiu"
+    ]
+    
+    if any(kw in url_lower for kw in finance_keywords):
         category = "finance"
-    elif any(kw in url.lower() for kw in ["bbc", "reuters", "nytimes"]):
+    elif any(kw in url_lower for kw in world_keywords):
         category = "world"
+    elif any(kw in url_lower for kw in tech_keywords):
+        category = "tech"
     
     try:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:

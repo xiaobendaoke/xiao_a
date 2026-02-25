@@ -28,6 +28,7 @@ from nonebot.exception import FinishedException
 from nonebot.rule import Rule, to_me
 # 注意：llm_core.py（原 llm.py）避免和 llm/ 文件夹冲突
 from .llm_core import get_ai_reply
+from .agent_core import get_agent_reply
 from .llm_news import consume_search_sources
 from .db import touch_active, save_profile_item, log_user_active_hour
 from .utils.world_info import get_time_description, get_time_period
@@ -779,10 +780,11 @@ async def handle_private_chat(event: PrivateMessageEvent):
             # 7.5) 股票查询（私聊命令）
             await _handle_stock_query_if_any(user_id, user_input)
 
-            # 8) 默认走普通聊天逻辑
+            # 8) 默认走 Agent 对话逻辑（支持 Tool Calling）
             voice_wanted = _looks_like_voice_reply_request(user_input)
-            reply = await get_ai_reply(str(user_id), user_input, voice_mode=voice_wanted)
             if voice_wanted:
+                # 语音模式走原 llm_core（避免 tool calling 输出不适合 TTS）
+                reply = await get_ai_reply(str(user_id), user_input, voice_mode=True)
                 try:
                     mood = mood_manager.get_user_mood(str(user_id))
                     record_b64 = await synthesize_record_base64(reply, mood=mood)
@@ -793,6 +795,8 @@ async def handle_private_chat(event: PrivateMessageEvent):
                     logger.exception(f"[voice] tts failed(uid={user_id}) on text: {e}")
                     await _send_and_finish(reply, user_id=user_id)
             else:
+                # 文本模式走 Agent（LLM 自主决定是否调用工具）
+                reply = await get_agent_reply(str(user_id), user_input)
                 await _send_and_finish(reply, user_id=user_id)
 
 

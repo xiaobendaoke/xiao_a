@@ -1,0 +1,30 @@
+services:
+  openclaw:
+    image: node:22-bookworm
+    container_name: openclaw
+    user: "node"
+    working_dir: /home/node
+    command:
+      - bash
+      - -lc
+      - |
+        set -e
+        npm install --location=global openclaw@latest
+        mkdir -p /home/node/.openclaw
+        cp /home/node/bootstrap/openclaw.json /home/node/.openclaw/openclaw.json
+        exec openclaw gateway --bind lan --port 18789
+    environment:
+      # 网关鉴权 token（你自己定义，给 xiao_a 作为 OPENCLAW_API_KEY 使用）
+      - OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN:-change_me_openclaw_token}
+      # DeepSeek 官方 API（openclaw.json 默认读取这个 key）
+      - DEEPSEEK_API_KEY=${OPENCLAW_DEEPSEEK_API_KEY:-}
+      # 可选：其他 provider key（仅当你在 openclaw.json 启用对应 provider 才需要）
+      - ANTHROPIC_API_KEY=${OPENCLAW_ANTHROPIC_API_KEY:-}
+      - OPENAI_API_KEY=${OPENCLAW_OPENAI_API_KEY:-}
+      - BRAVE_API_KEY=${OPENCLAW_BRAVE_API_KEY:-}
+    volumes:
+      - ./openclaw/state:/home/node/.openclaw
+      - ./openclaw/openclaw.json:/home/node/bootstrap/openclaw.json:ro
+    ports:
+      - "18789:18789"
+    restart: unless-stopped
