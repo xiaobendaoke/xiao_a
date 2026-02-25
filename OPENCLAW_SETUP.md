@@ -15,7 +15,7 @@ OPENCLAW_BRAVE_API_KEY=
 
 2. 启动网关：
 ```bash
-docker compose -f docker-compose.openclaw.yml up -d
+docker compose -f docker-compose.openclaw.yml up -d --build
 ```
 
 网关默认端口：`18789`
