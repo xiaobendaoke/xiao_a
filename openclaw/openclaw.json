@@ -17,13 +17,29 @@
       }
     }
   },
-  "tools": {
-    "@openclaw/web-search/brave": {
-      "enabled": false
+  "agents": {
+    "defaults": {
+      "workspace": "~/.openclaw/workspace",
+      "model": {
+        "primary": "deepseek/deepseek-chat"
+      },
+      "models": {
+        "deepseek/deepseek-chat": {
+          "alias": "deepseek-chat"
+        },
+        "deepseek/deepseek-reasoner": {
+          "alias": "deepseek-reasoner"
+        }
+      }
     },
-    "@openclaw/fetch": {
-      "enabled": true
-    }
+    "list": [
+      {
+        "id": "main",
+        "default": true,
+        "name": "Main Agent",
+        "model": "deepseek/deepseek-chat"
+      }
+    ]
   },
   "models": {
     "mode": "merge",
@@ -39,12 +55,16 @@
       }
     }
   },
-  "agents": {
-    "main": {
-      "name": "main",
-      "description": "XiaoA external capability sidecar",
-      "model": "deepseek/deepseek-chat",
-      "temperature": 0.2
+  "tools": {
+    "profile": "coding",
+    "web": {
+      "search": {
+        "enabled": false
+      },
+      "fetch": {
+        "enabled": true,
+        "maxChars": 50000
+      }
     }
   }
 }
