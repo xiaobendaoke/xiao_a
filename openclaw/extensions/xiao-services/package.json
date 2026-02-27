@@ -1,0 +1,15 @@
+{
+  "name": "@local/xiao-services",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Xiao service tools for OpenClaw",
+  "type": "module",
+  "peerDependencies": {
+    "openclaw": ">=2026.1.26"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}

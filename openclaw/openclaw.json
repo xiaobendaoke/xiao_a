@@ -73,5 +73,19 @@
         "maxChars": 50000
       }
     }
+  },
+  "plugins": {
+    "allow": [
+      "xiao-services",
+      "xiao-emotion"
+    ],
+    "entries": {
+      "xiao-services": {
+        "enabled": true
+      },
+      "xiao-emotion": {
+        "enabled": true
+      }
+    }
   }
 }

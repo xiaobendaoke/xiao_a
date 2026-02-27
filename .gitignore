@@ -20,3 +20,11 @@ __MACOSX/
 
 # If you intentionally want to version the root DB file
 !/data.db
+
+# OpenClaw runtime state (generated at runtime; do not commit)
+openclaw/state/
+
+# OpenClaw extension build/runtime artifacts
+openclaw/extensions/**/node_modules/
+openclaw/extensions/**/dist/
+openclaw/extensions/**/.cache/

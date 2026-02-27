@@ -20,6 +20,7 @@ services:
     volumes:
       - ./openclaw/state:/home/node/.openclaw
       - ./openclaw/openclaw.json:/home/node/.openclaw/openclaw.json:ro
+      - ./openclaw/extensions:/home/node/.openclaw/extensions:ro
     ports:
       - "18789:18789"
     restart: unless-stopped

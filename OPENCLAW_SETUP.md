@@ -20,6 +20,12 @@ docker compose -f docker-compose.openclaw.yml up -d --build
 
 网关默认端口：`18789`
 默认 Agent 配置文件：`openclaw/openclaw.json`（可按你的 provider/model 修改）
+本仓库自带扩展目录：`openclaw/extensions/`（含 `xiao-services`、`xiao-emotion`）
+如需旧账号记忆衔接，可在 `.env` 增加：
+```env
+XIAO_USER_ALIAS_MAP=qqbot:<当前OpenID>=qqbot:<历史QQ号>
+XIAO_LEGACY_DB_PATH=/root/xiao_a/data.db
+```
 
 ## 2) 验证网关是否可用
 

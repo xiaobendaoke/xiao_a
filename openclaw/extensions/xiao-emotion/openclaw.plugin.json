@@ -1,0 +1,21 @@
+{
+  "id": "xiao-emotion",
+  "name": "Xiao Emotion",
+  "description": "Mood and profile hooks with tag parsing",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": true,
+    "properties": {
+      "quietHours": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": { "type": "boolean" },
+          "startHour": { "type": "integer", "minimum": 0, "maximum": 23 },
+          "endHour": { "type": "integer", "minimum": 0, "maximum": 23 },
+          "timezone": { "type": "string" }
+        }
+      }
+    }
+  }
+}

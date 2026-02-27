@@ -1,0 +1,12 @@
+{
+  "id": "xiao-services",
+  "name": "Xiao Services",
+  "description": "Search, weather, stock, vision and service probe tools",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "timezone": { "type": "string" }
+    }
+  }
+}
