@@ -1,8 +1,8 @@
 """RAG 功能验证脚本
-请在 NoneBot 容器内运行，或确保本地已安装 chromadb 和相关依赖。
+可在 NoneBot 运行环境内执行，或在本地安装依赖后直接执行。
 运行方式：
-  docker-compose exec bot python test_rag.py (推荐)
-  python test_rag.py (如果本地环境就绪)
+  docker compose exec nonebot python test_rag.py
+  python test_rag.py
 
 前置条件：
   必须配置了 SILICONFLOW_API_KEY (或 EMBEDDING_MODEL 对应平台的 Key)

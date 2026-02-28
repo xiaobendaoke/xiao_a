@@ -1,0 +1,10 @@
+{
+  "id": "xiao-core",
+  "name": "Xiao Core",
+  "description": "Core migration helpers and identity diagnostics for QQ channel cutover",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": true,
+    "properties": {}
+  }
+}

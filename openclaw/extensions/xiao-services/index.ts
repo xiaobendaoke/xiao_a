@@ -16,6 +16,14 @@ type ToolResult = {
 };
 
 type ProbeStatus = "ok" | "fail" | "skip";
+type ObsMetric = {
+  ts: string;
+  request_id: string;
+  user_key: string;
+  tool_name: string;
+  latency_ms: number;
+  error_code: string;
+};
 
 let xiaoEnvCache: Record<string, string> | null = null;
 let xiaoEnvMtimeMs = -1;
@@ -126,6 +134,138 @@ function clamp(n: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, n));
 }
 
+function mediaMaxBytes(): number {
+  const mbRaw = env("XIAO_MEDIA_MAX_MB") || "20";
+  const mb = clamp(Number(mbRaw), 1, 200);
+  return Math.trunc(mb * 1024 * 1024);
+}
+
+function envTimeoutMs(name: string, defaultMs: number): number {
+  const raw = env(name);
+  const n = Number(raw || defaultMs);
+  if (!Number.isFinite(n) || n <= 0) {
+    return defaultMs;
+  }
+  return clamp(Math.trunc(n), 3000, 120000);
+}
+
+function normalizeScale(value: unknown, fallback: number = 1): number {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) {
+    return fallback;
+  }
+  return clamp(n, 0.5, 2.0);
+}
+
+function classifyToolError(err: unknown): string {
+  const msg = errToString(err).toLowerCase();
+  if (msg.includes("media_too_large") || msg.includes("audio_too_large")) return "media_too_large";
+  if (msg.includes("unsupported_media_type")) return "unsupported_media_type";
+  if (msg.includes("aborted") || msg.includes("timeout")) return "timeout";
+  if (msg.includes("http 401") || msg.includes("http 403")) return "auth_failed";
+  if (msg.includes("http 429") || msg.includes("rate")) return "rate_limited";
+  if (msg.includes("invalid_input")) return "invalid_input";
+  if (msg.includes("missing_env")) return "missing_env";
+  if (msg.includes("location_not_found")) return "location_not_found";
+  if (msg.includes("invalid_symbol")) return "invalid_symbol";
+  return "tool_error";
+}
+
+function fallbackHintForError(tool: "vision" | "asr" | "tts", errorCode: string): string {
+  const code = (errorCode || "").trim().toLowerCase();
+  if (tool === "vision") {
+    if (code === "timeout") return "图片识别超时了，请稍后重试，或换更清晰的图片。";
+    if (code === "media_too_large") return "图片文件太大了，请压缩到更小体积后再试。";
+    if (code === "unsupported_media_type") return "图片格式暂不支持，建议使用 jpg/png/webp。";
+    if (code === "auth_failed") return "图片识别服务鉴权失败，请检查 DASHSCOPE_API_KEY。";
+    if (code === "rate_limited") return "图片识别服务当前较忙，请稍后重试。";
+    return "图片识别暂时失败，请稍后重试或换一张更清晰/更小的图片。";
+  }
+  if (tool === "asr") {
+    if (code === "timeout") return "语音识别超时了，请重试或改用更短音频。";
+    if (code === "media_too_large") return "音频文件太大了，请压缩或截短后再试。";
+    if (code === "unsupported_media_type") return "音频格式暂不支持，建议使用 mp3/wav/m4a。";
+    if (code === "auth_failed") return "语音识别服务鉴权失败，请检查 DASHSCOPE_API_KEY。";
+    if (code === "rate_limited") return "语音识别服务当前较忙，请稍后重试。";
+    return "语音识别暂时失败，请重试或改用更短、更清晰的音频。";
+  }
+  if (code === "timeout") return "语音合成超时了，请稍后重试或缩短文本。";
+  if (code === "auth_failed") return "语音合成服务鉴权失败，请检查 DASHSCOPE_API_KEY。";
+  if (code === "rate_limited") return "语音合成服务当前较忙，请稍后重试。";
+  return "语音合成暂时失败，请稍后重试或缩短文本。";
+}
+
+function buildTtsInstruction(base: string | undefined, rate: number, pitch: number, volume: number): string | undefined {
+  const chunks: string[] = [];
+  if (base && base.trim()) {
+    chunks.push(base.trim());
+  }
+  if (Math.abs(rate - 1) > 0.01 || Math.abs(pitch - 1) > 0.01 || Math.abs(volume - 1) > 0.01) {
+    chunks.push(`语速=${rate.toFixed(2)}x，音调=${pitch.toFixed(2)}x，音量=${volume.toFixed(2)}x。`);
+  }
+  if (!chunks.length) {
+    return undefined;
+  }
+  return chunks.join(" ");
+}
+
+function buildVisionPrompt(prompt?: string): string {
+  const base =
+    env("XIAO_VISION_DEFAULT_PROMPT") ||
+    "你是小a。请先客观描述图片中的主体与关键信息，再结合用户问题给出结论。若有不确定之处，请明确标注。请用简洁中文回答。";
+  const custom = (prompt || "").trim();
+  if (!custom) {
+    return base;
+  }
+  return `${base}\n用户补充要求：${custom}`;
+}
+
+function resolveObsFilePath(): string {
+  const fromEnv = (process.env.XIAO_OBS_FILE || "").trim();
+  if (fromEnv) {
+    return fromEnv;
+  }
+  return path.join(homedir(), ".openclaw", "xiao-core", "observability.jsonl");
+}
+
+function resolveObsUserKey(params: unknown): string {
+  const p = (params || {}) as Record<string, unknown>;
+  const raw =
+    (typeof p.userKey === "string" && p.userKey.trim()) ||
+    (typeof p.to === "string" && p.to.trim()) ||
+    "unknown";
+  const qq = raw.match(/^qqbot:(?:c2c|group):([A-Za-z0-9._:-]{6,128})$/i);
+  if (qq?.[1]) {
+    return `qqbot:${qq[1]}`;
+  }
+  return raw.slice(0, 160);
+}
+
+async function writeObsMetric(metric: ObsMetric): Promise<void> {
+  try {
+    const file = resolveObsFilePath();
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.appendFile(file, `${JSON.stringify(metric)}\n`, "utf8");
+  } catch {
+    // best effort metrics logging
+  }
+}
+
+async function obsWrap(toolName: string, userKey: string, startedAt: number, payload: unknown): Promise<ToolResult> {
+  const obj = (payload || {}) as Record<string, unknown>;
+  const errorCode =
+    obj && obj.ok === false ? String(obj.error || "tool_error").slice(0, 120) : "";
+  await writeObsMetric({
+    ts: new Date().toISOString(),
+    request_id: randomUUID(),
+    user_key: userKey || "unknown",
+    tool_name: toolName,
+    latency_ms: Math.max(0, Date.now() - startedAt),
+    error_code: errorCode,
+  });
+  return jsonResult(payload);
+}
+
 function resolveDashscopeAigcEndpoint(baseUrl: string): string {
   const fallback = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation";
   try {
@@ -203,6 +343,138 @@ async function fetchJsonByCurl(params: {
   }
 }
 
+async function fetchTextByCurl(params: {
+  url: string;
+  timeoutSec?: number;
+  proxy?: string;
+  headers?: Record<string, string>;
+  compressed?: boolean;
+}): Promise<string> {
+  const timeoutSec = clamp(Number(params.timeoutSec || 20), 3, 120);
+  const args: string[] = ["-sS", "-L", "--fail-with-body", "--max-time", String(timeoutSec)];
+  if (params.compressed === true) {
+    args.push("--compressed");
+  }
+  const proxy = (params.proxy || "").trim();
+  if (proxy) {
+    args.push("-x", proxy);
+  }
+  for (const [k, v] of Object.entries(params.headers || {})) {
+    args.push("-H", `${k}: ${v}`);
+  }
+  args.push(params.url);
+
+  try {
+    const { stdout } = await execFileAsync("curl", args, {
+      timeout: timeoutSec * 1000 + 3000,
+      maxBuffer: 8 * 1024 * 1024,
+      env: {
+        ...process.env,
+        HTTP_PROXY: proxy || "",
+        HTTPS_PROXY: proxy || "",
+        ALL_PROXY: proxy || "",
+        http_proxy: proxy || "",
+        https_proxy: proxy || "",
+        all_proxy: proxy || "",
+      },
+    });
+    return String(stdout || "");
+  } catch (err) {
+    const e = err as Error & { stdout?: string; stderr?: string };
+    const msg = `${(e.stderr || "").trim()} ${(e.stdout || "").trim()}`.trim() || errToString(err);
+    throw new Error(`curl request failed: ${msg.slice(0, 300)}`);
+  }
+}
+
+function isoDateDaysAgo(days: number): string {
+  const d = new Date(Date.now() - Math.max(0, days) * 24 * 60 * 60 * 1000);
+  return d.toISOString().slice(0, 10);
+}
+
+async function fetchGithubTrendingBySearchApi(params: {
+  since: "daily" | "weekly" | "monthly";
+  language?: string;
+  limit: number;
+}): Promise<
+  Array<{
+    repo: string;
+    url: string;
+    description: string;
+    language: string;
+    starsTotal: number | null;
+    starsPeriod: number | null;
+    since: "daily" | "weekly" | "monthly";
+    source: "search_api";
+  }>
+> {
+  const since = params.since;
+  const language = (params.language || "").trim();
+  const limit = clamp(params.limit, 1, 20);
+  const days = since === "daily" ? 1 : since === "monthly" ? 30 : 7;
+
+  const queryParts = [`created:>=${isoDateDaysAgo(days)}`];
+  if (language) {
+    queryParts.push(`language:${language}`);
+  }
+
+  const url = new URL("https://api.github.com/search/repositories");
+  url.searchParams.set("q", queryParts.join(" "));
+  url.searchParams.set("sort", "stars");
+  url.searchParams.set("order", "desc");
+  url.searchParams.set("per_page", String(limit));
+
+  const proxy = envAny([
+    "GITHUB_TRENDING_PROXY",
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "https_proxy",
+    "http_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+  ]);
+  const token = env("GITHUB_TOKEN");
+
+  const headers: Record<string, string> = {
+    Accept: "application/vnd.github+json",
+    "User-Agent": "xiao-a-openclaw",
+    "X-GitHub-Api-Version": "2022-11-28",
+  };
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+
+  const data = (await fetchJsonByCurl({
+    url: url.toString(),
+    timeoutSec: 20,
+    proxy: proxy || undefined,
+    headers,
+  })) as {
+    items?: Array<{
+      full_name?: string;
+      html_url?: string;
+      description?: string | null;
+      language?: string | null;
+      stargazers_count?: number;
+    }>;
+    message?: string;
+  };
+
+  const items = Array.isArray(data.items) ? data.items : [];
+  return items.slice(0, limit).map((it) => {
+    const repo = String(it.full_name || "").trim();
+    return {
+      repo,
+      url: String(it.html_url || `https://github.com/${repo}`),
+      description: cleanText(it.description || "", 260),
+      language: String(it.language || "").trim(),
+      starsTotal: Number.isFinite(Number(it.stargazers_count)) ? Number(it.stargazers_count) : null,
+      starsPeriod: null,
+      since,
+      source: "search_api" as const,
+    };
+  });
+}
+
 async function fetchBytes(
   url: string,
   init?: RequestInit,
@@ -216,8 +488,16 @@ async function fetchBytes(
     const text = await res.text().catch(() => "");
     throw new Error(`HTTP ${res.status}: ${text.slice(0, 300)}`);
   }
+  const maxBytes = mediaMaxBytes();
+  const contentLength = Number(res.headers.get("content-length") || 0);
+  if (Number.isFinite(contentLength) && contentLength > 0 && contentLength > maxBytes) {
+    throw new Error(`media_too_large: content-length=${contentLength} > max=${maxBytes}`);
+  }
   const contentType = res.headers.get("content-type") || "application/octet-stream";
   const ab = await res.arrayBuffer();
+  if (ab.byteLength > maxBytes) {
+    throw new Error(`media_too_large: bytes=${ab.byteLength} > max=${maxBytes}`);
+  }
   return {
     bytes: new Uint8Array(ab),
     contentType,
@@ -423,6 +703,202 @@ function weatherCodeToText(code: unknown): string {
   return Number.isFinite(n) && mapping[n] ? mapping[n] : "Unknown";
 }
 
+function decodeHtmlEntities(input: string): string {
+  const map: Record<string, string> = {
+    "&amp;": "&",
+    "&lt;": "<",
+    "&gt;": ">",
+    "&quot;": "\"",
+    "&#39;": "'",
+    "&nbsp;": " ",
+  };
+  return (input || "").replace(/&(amp|lt|gt|quot|#39|nbsp);/g, (m) => map[m] || m);
+}
+
+function stripHtmlTags(input: string): string {
+  return decodeHtmlEntities((input || "").replace(/<[^>]+>/g, " "));
+}
+
+function cleanText(input: string, maxLen: number = 260): string {
+  const text = stripHtmlTags(input).replace(/\s+/g, " ").trim();
+  if (text.length <= maxLen) {
+    return text;
+  }
+  return `${text.slice(0, maxLen)}...`;
+}
+
+function normalizeHttpUrl(raw: string): string {
+  const text = (raw || "").trim();
+  if (!text) {
+    throw new Error("invalid_input: url is required");
+  }
+  let u: URL;
+  try {
+    u = new URL(text);
+  } catch {
+    throw new Error("invalid_input: url is not valid");
+  }
+  if (!/^https?:$/i.test(u.protocol)) {
+    throw new Error("invalid_input: only http/https url is supported");
+  }
+  return u.toString();
+}
+
+function pickMetaDescription(html: string): string {
+  const patterns = [
+    /<meta\s+name=["']description["']\s+content=["']([^"']+)["']/i,
+    /<meta\s+content=["']([^"']+)["']\s+name=["']description["']/i,
+    /<meta\s+property=["']og:description["']\s+content=["']([^"']+)["']/i,
+    /<meta\s+content=["']([^"']+)["']\s+property=["']og:description["']/i,
+  ];
+  for (const p of patterns) {
+    const m = html.match(p);
+    if (m?.[1]) {
+      const t = cleanText(m[1], 600);
+      if (t) return t;
+    }
+  }
+  return "";
+}
+
+function extractReadableFromHtml(html: string, maxChars: number): string {
+  const stripped = (html || "")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ")
+    .replace(/<svg[\s\S]*?<\/svg>/gi, " ")
+    .replace(/<header[\s\S]*?<\/header>/gi, " ")
+    .replace(/<footer[\s\S]*?<\/footer>/gi, " ")
+    .replace(/<nav[\s\S]*?<\/nav>/gi, " ");
+
+  const plain = cleanText(stripped, Math.max(4000, maxChars * 3));
+  if (!plain) {
+    return "";
+  }
+
+  // Prefer text chunks that are likely content body (longer sentences).
+  const chunks = plain
+    .split(/[。！？.!?\n]/)
+    .map((s) => s.trim())
+    .filter((s) => s.length >= 16)
+    .slice(0, 120);
+  const joined = chunks.join("。");
+  return cleanText(joined || plain, maxChars);
+}
+
+async function fetchGithubTrending(params: {
+  since: "daily" | "weekly" | "monthly";
+  language?: string;
+  limit: number;
+}): Promise<
+  Array<{
+    repo: string;
+    url: string;
+    description: string;
+    language: string;
+    starsTotal: number | null;
+    starsPeriod: number | null;
+    since: "daily" | "weekly" | "monthly";
+    source: "trending_html" | "search_api";
+  }>
+> {
+  const since = params.since;
+  const language = (params.language || "").trim().toLowerCase();
+  const limit = clamp(params.limit, 1, 20);
+  const langPath = language ? `/${encodeURIComponent(language)}` : "";
+  const url = `https://github.com/trending${langPath}?since=${since}`;
+
+  const proxy = envAny([
+    "GITHUB_TRENDING_PROXY",
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "https_proxy",
+    "http_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+  ]);
+
+  try {
+    const html = await fetchTextByCurl({
+      url,
+      timeoutSec: 35,
+      compressed: true,
+      proxy: proxy || undefined,
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+        Accept: "text/html,application/xhtml+xml",
+        Referer: "https://github.com/trending",
+      },
+    });
+
+    const articleRegex = /<article[\s\S]*?<\/article>/g;
+    const rows = (html.match(articleRegex) || [])
+      .filter((row) => /Box-row/.test(row))
+      .slice(0, Math.max(limit * 3, 20));
+
+    const out: Array<{
+      repo: string;
+      url: string;
+      description: string;
+      language: string;
+      starsTotal: number | null;
+      starsPeriod: number | null;
+      since: "daily" | "weekly" | "monthly";
+      source: "trending_html" | "search_api";
+    }> = [];
+
+    const seen = new Set<string>();
+    for (const row of rows) {
+      const repoMatch = row.match(/<h2[\s\S]*?<a[^>]*href="\/([^"?#]+)"/i);
+      const repo = cleanText(repoMatch?.[1] || "", 120).replace(/\s+/g, "");
+      if (!repo || !repo.includes("/") || seen.has(repo)) {
+        continue;
+      }
+
+      const descMatch = row.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
+      const description = cleanText(descMatch?.[1] || "", 260);
+
+      const langMatch = row.match(/itemprop="programmingLanguage"[^>]*>([\s\S]*?)<\/span>/i);
+      const repoLang = cleanText(langMatch?.[1] || "", 60);
+
+      const starTotalMatch = row.match(/href="\/[^"?#]+\/stargazers"[^>]*>\s*([\d,]+)\s*<\/a>/i);
+      const starsTotal = starTotalMatch?.[1] ? Number(starTotalMatch[1].replace(/,/g, "")) : null;
+
+      const starPeriodMatch = row.match(/([\d,]+)\s+stars?\s+(today|this week|this month)/i);
+      const starsPeriod = starPeriodMatch?.[1] ? Number(starPeriodMatch[1].replace(/,/g, "")) : null;
+
+      seen.add(repo);
+      out.push({
+        repo,
+        url: `https://github.com/${repo}`,
+        description,
+        language: repoLang || "",
+        starsTotal: Number.isFinite(starsTotal) ? starsTotal : null,
+        starsPeriod: Number.isFinite(starsPeriod) ? starsPeriod : null,
+        since,
+        source: "trending_html",
+      });
+
+      if (out.length >= limit) {
+        break;
+      }
+    }
+
+    if (out.length > 0) {
+      return out;
+    }
+  } catch {
+    // fallback below
+  }
+
+  return await fetchGithubTrendingBySearchApi({
+    since,
+    language,
+    limit,
+  });
+}
+
 function parseBase64AudioInput(input: string): {
   bytes: Uint8Array;
   mimeType: string;
@@ -457,6 +933,81 @@ function parseBase64AudioInput(input: string): {
   };
 }
 
+function parseBase64ImageInput(input: string): {
+  bytes: Uint8Array;
+  mimeType: string;
+} {
+  const text = (input || "").trim();
+  if (!text) {
+    throw new Error("invalid_input: imageUrl is empty");
+  }
+  const dataUrlMatch = text.match(/^data:([^;]+);base64,(.+)$/i);
+  if (!dataUrlMatch?.[1] || !dataUrlMatch?.[2]) {
+    throw new Error("invalid_input: imageUrl must be a valid image URL or data URL");
+  }
+  const mimeType = (dataUrlMatch[1] || "application/octet-stream").trim().toLowerCase();
+  if (!mimeType.startsWith("image/")) {
+    throw new Error(`unsupported_media_type: ${mimeType}`);
+  }
+  const bytes = Buffer.from(dataUrlMatch[2], "base64");
+  if (!bytes.length) {
+    throw new Error("invalid_input: image data is empty");
+  }
+  const maxBytes = mediaMaxBytes();
+  if (bytes.byteLength > maxBytes) {
+    throw new Error(`media_too_large: bytes=${bytes.byteLength} > max=${maxBytes}`);
+  }
+  return {
+    bytes: new Uint8Array(bytes),
+    mimeType,
+  };
+}
+
+async function resolveVisionImageInput(imageUrl: string, timeoutMs: number): Promise<{
+  imageRef: string;
+  source: "data_url" | "downloaded_url";
+  mimeType: string;
+  bytes: number;
+}> {
+  const raw = (imageUrl || "").trim();
+  if (!raw) {
+    throw new Error("invalid_input: imageUrl is required");
+  }
+
+  if (/^data:/i.test(raw)) {
+    const parsed = parseBase64ImageInput(raw);
+    return {
+      imageRef: raw,
+      source: "data_url",
+      mimeType: parsed.mimeType,
+      bytes: parsed.bytes.byteLength,
+    };
+  }
+
+  let urlObj: URL;
+  try {
+    urlObj = new URL(raw);
+  } catch {
+    throw new Error("invalid_input: imageUrl is not a valid URL");
+  }
+  if (!/^https?:$/i.test(urlObj.protocol)) {
+    throw new Error("invalid_input: imageUrl must use http/https");
+  }
+
+  const downloaded = await fetchBytes(raw, undefined, clamp(Math.trunc(timeoutMs * 0.7), 6000, 30000));
+  const mimeType = (downloaded.contentType || "").toLowerCase();
+  if (!mimeType.startsWith("image/")) {
+    throw new Error(`unsupported_media_type: ${mimeType || "unknown"}`);
+  }
+  const dataUrl = `data:${mimeType};base64,${Buffer.from(downloaded.bytes).toString("base64")}`;
+  return {
+    imageRef: dataUrl,
+    source: "downloaded_url",
+    mimeType,
+    bytes: downloaded.bytes.byteLength,
+  };
+}
+
 async function resolveAudioInput(params: {
   audioUrl?: string;
   audioBase64?: string;
@@ -482,6 +1033,11 @@ async function resolveAudioInput(params: {
 
   if (audioPath) {
     const absolutePath = path.resolve(audioPath);
+    const st = await fs.stat(absolutePath);
+    const maxBytes = mediaMaxBytes();
+    if (st.size > maxBytes) {
+      throw new Error(`media_too_large: file=${st.size} > max=${maxBytes}`);
+    }
     const fileBytes = await fs.readFile(absolutePath);
     if (!fileBytes.byteLength) {
       throw new Error("audioPath points to empty file");
@@ -504,6 +1060,7 @@ async function callAsrOpenAICompat(params: {
   audio: { bytes: Uint8Array; mimeType: string; filename: string };
   language?: string;
   prompt?: string;
+  timeoutMs?: number;
 }): Promise<{ text: string; raw: unknown }> {
   const url = `${params.baseUrl.replace(/\/$/, "")}/audio/transcriptions`;
   const form = new FormData();
@@ -526,7 +1083,7 @@ async function callAsrOpenAICompat(params: {
       Authorization: `Bearer ${params.apiKey}`,
     },
     body: form,
-    signal: AbortSignal.timeout(45000),
+    signal: AbortSignal.timeout(params.timeoutMs || 45000),
   });
 
   const textBody = await res.text();
@@ -563,6 +1120,7 @@ async function callAsrDashscopeAigc(params: {
   model: string;
   audio: { bytes: Uint8Array; mimeType: string; filename: string };
   prompt?: string;
+  timeoutMs?: number;
 }): Promise<{ text: string; raw: unknown }> {
   const endpoint = resolveDashscopeAigcEndpoint(params.baseUrl);
   const mime = params.audio.mimeType || "audio/wav";
@@ -599,7 +1157,7 @@ async function callAsrDashscopeAigc(params: {
       },
       body: JSON.stringify(payload),
     },
-    60000,
+    params.timeoutMs || 60000,
   );
 
   const text =
@@ -644,6 +1202,7 @@ async function callTtsOpenAICompat(params: {
   input: string;
   format: string;
   instructions?: string;
+  timeoutMs?: number;
 }): Promise<{ audioBytes: Uint8Array; mimeType: string }> {
   const url = `${params.baseUrl.replace(/\/$/, "")}/audio/speech`;
   const payload: Record<string, unknown> = {
@@ -664,7 +1223,7 @@ async function callTtsOpenAICompat(params: {
       "Content-Type": "application/json",
     },
     body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(45000),
+    signal: AbortSignal.timeout(params.timeoutMs || 45000),
   });
 
   const contentType = res.headers.get("content-type") || "application/octet-stream";
@@ -704,6 +1263,10 @@ async function callTtsDashscopeAigc(params: {
   voice: string;
   input: string;
   format: string;
+  rate?: number;
+  pitch?: number;
+  volume?: number;
+  timeoutMs?: number;
 }): Promise<{ audioBytes: Uint8Array; mimeType: string; raw: unknown }> {
   const endpoint = resolveDashscopeAigcEndpoint(params.baseUrl);
   const payload = {
@@ -712,6 +1275,9 @@ async function callTtsDashscopeAigc(params: {
     parameters: {
       voice: params.voice,
       format: params.format,
+      rate: params.rate,
+      pitch: params.pitch,
+      volume: params.volume,
     },
   };
 
@@ -725,7 +1291,7 @@ async function callTtsDashscopeAigc(params: {
       },
       body: JSON.stringify(payload),
     },
-    60000,
+    params.timeoutMs || 60000,
   )) as Record<string, unknown>;
 
   const output = (raw.output || {}) as Record<string, unknown>;
@@ -844,6 +1410,20 @@ async function runServiceProbe(): Promise<{
     checks.push({ name: "stock_quote", status: "fail", detail: errToString(err) });
   }
 
+  try {
+    const items = await fetchGithubTrending({ since: "weekly", limit: 1 });
+    if (!items.length) {
+      throw new Error("empty weekly trending result");
+    }
+    checks.push({
+      name: "github_trending",
+      status: "ok",
+      detail: `${items[0].repo} stars_period=${items[0].starsPeriod ?? "-"}`,
+    });
+  } catch (err) {
+    checks.push({ name: "github_trending", status: "fail", detail: errToString(err) });
+  }
+
   const dashscopeKey = env("DASHSCOPE_API_KEY");
   if (!dashscopeKey) {
     checks.push({ name: "dashscope", status: "skip", detail: "Missing DASHSCOPE_API_KEY" });
@@ -882,6 +1462,16 @@ const searchSchema = {
   },
 } as const;
 
+const urlDigestSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["url"],
+  properties: {
+    url: { type: "string", description: "HTTP/HTTPS URL to summarize" },
+    maxChars: { type: "integer", minimum: 240, maximum: 4000, description: "Max chars for extracted body text" },
+  },
+} as const;
+
 const weatherSchema = {
   type: "object",
   additionalProperties: false,
@@ -897,6 +1487,28 @@ const stockSchema = {
   required: ["symbol"],
   properties: {
     symbol: { type: "string", description: "Stock symbol, e.g. 600519 or 600519.SH" },
+  },
+} as const;
+
+const githubTrendingSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    since: {
+      type: "string",
+      enum: ["daily", "weekly", "monthly"],
+      description: "Trending period",
+    },
+    language: {
+      type: "string",
+      description: "Optional language filter, e.g. python / go / rust",
+    },
+    limit: {
+      type: "integer",
+      minimum: 1,
+      maximum: 20,
+      description: "Result count (1-20)",
+    },
   },
 } as const;
 
@@ -937,6 +1549,9 @@ const ttsSchema = {
       description: "Output audio format",
     },
     instructions: { type: "string", description: "Optional style instruction" },
+    rate: { type: "number", minimum: 0.5, maximum: 2.0, description: "Speech rate multiplier (0.5-2.0)" },
+    pitch: { type: "number", minimum: 0.5, maximum: 2.0, description: "Pitch multiplier (0.5-2.0)" },
+    volume: { type: "number", minimum: 0.5, maximum: 2.0, description: "Volume multiplier (0.5-2.0)" },
     returnBase64: { type: "boolean", description: "Include full base64 in output" },
   },
 } as const;
@@ -1038,14 +1653,88 @@ const xiaoServicesPlugin = {
     } as AnyAgentTool);
 
     api.registerTool({
+      name: "xiao_url_digest",
+      label: "Xiao URL Digest",
+      description: "Fetch a web page and extract title/description/body preview for summarization.",
+      parameters: urlDigestSchema,
+      async execute(_toolCallId: string, params: { url?: string; maxChars?: number }) {
+        const obsStart = Date.now();
+        const obsUser = resolveObsUserKey(params);
+        const maxChars = clamp(Number(params.maxChars || 1600), 240, 4000);
+        let url = "";
+        try {
+          url = normalizeHttpUrl(params.url || "");
+        } catch (err) {
+          const errorCode = classifyToolError(err);
+          return await obsWrap("xiao_url_digest", obsUser, obsStart, {
+            ok: false,
+            error: errorCode,
+            errorDetail: errToString(err),
+          });
+        }
+
+        try {
+          const html = await fetchTextByCurl({
+            url,
+            timeoutSec: 25,
+            compressed: true,
+            headers: {
+              "User-Agent":
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+              Accept: "text/html,application/xhtml+xml",
+            },
+          });
+
+          const title = cleanText((html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || "").trim(), 220);
+          const description = pickMetaDescription(html);
+          const preview = extractReadableFromHtml(html, maxChars);
+          if (!title && !description && !preview) {
+            return await obsWrap("xiao_url_digest", obsUser, obsStart, {
+              ok: false,
+              error: "empty_response",
+              url,
+            });
+          }
+
+          let domain = "";
+          try {
+            domain = new URL(url).hostname;
+          } catch {
+            domain = "";
+          }
+
+          return await obsWrap("xiao_url_digest", obsUser, obsStart, {
+            ok: true,
+            url,
+            domain,
+            title,
+            description,
+            preview,
+            maxChars,
+          });
+        } catch (err) {
+          const errorCode = classifyToolError(err);
+          return await obsWrap("xiao_url_digest", obsUser, obsStart, {
+            ok: false,
+            error: errorCode,
+            errorDetail: errToString(err),
+            url,
+          });
+        }
+      },
+    } as AnyAgentTool);
+
+    api.registerTool({
       name: "xiao_weather_openmeteo",
       label: "Xiao Weather",
       description: "Get weather summary from Open-Meteo.",
       parameters: weatherSchema,
       async execute(_toolCallId: string, params: { city?: string }) {
+        const obsStart = Date.now();
+        const obsUser = resolveObsUserKey(params);
         const city = (params.city || "").trim();
         if (!city) {
-          return jsonResult({ ok: false, error: "city is required" });
+          return await obsWrap("xiao_weather_openmeteo", obsUser, obsStart, { ok: false, error: "city is required" });
         }
 
         try {
@@ -1066,7 +1755,11 @@ const xiaoServicesPlugin = {
           };
           const item = Array.isArray(geo.results) ? geo.results[0] : undefined;
           if (!item) {
-            return jsonResult({ ok: false, error: "location_not_found", city });
+            return await obsWrap("xiao_weather_openmeteo", obsUser, obsStart, {
+              ok: false,
+              error: "location_not_found",
+              city,
+            });
           }
 
           const forecastUrl = new URL("https://api.open-meteo.com/v1/forecast");
@@ -1098,7 +1791,7 @@ const xiaoServicesPlugin = {
             ? daily.precipitation_probability_max[0]
             : null;
 
-          return jsonResult({
+          return await obsWrap("xiao_weather_openmeteo", obsUser, obsStart, {
             ok: true,
             provider: "open-meteo",
             city: item.name,
@@ -1119,7 +1812,10 @@ const xiaoServicesPlugin = {
             },
           });
         } catch (err) {
-          return jsonResult({ ok: false, error: errToString(err) });
+          return await obsWrap("xiao_weather_openmeteo", obsUser, obsStart, {
+            ok: false,
+            error: errToString(err),
+          });
         }
       },
     } as AnyAgentTool);
@@ -1130,26 +1826,32 @@ const xiaoServicesPlugin = {
       description: "Get China A-share quote (Eastmoney primary, Sina fallback).",
       parameters: stockSchema,
       async execute(_toolCallId: string, params: { symbol?: string }) {
+        const obsStart = Date.now();
+        const obsUser = resolveObsUserKey(params);
         const symbol = (params.symbol || "").trim();
         const normalized = normalizeStockSymbol(symbol);
         if (!normalized) {
-          return jsonResult({ ok: false, error: "invalid_symbol", symbol });
+          return await obsWrap("xiao_stock_quote", obsUser, obsStart, {
+            ok: false,
+            error: "invalid_symbol",
+            symbol,
+          });
         }
 
         try {
           const primary = await fetchStockEastmoney(normalized);
-          return jsonResult({ ok: true, ...primary });
+          return await obsWrap("xiao_stock_quote", obsUser, obsStart, { ok: true, ...primary });
         } catch (err) {
           try {
             const fallback = await fetchStockSina(normalized);
-            return jsonResult({
+            return await obsWrap("xiao_stock_quote", obsUser, obsStart, {
               ok: true,
               ...fallback,
               fallbackFrom: "eastmoney",
               fallbackReason: errToString(err),
             });
           } catch (fallbackErr) {
-            return jsonResult({
+            return await obsWrap("xiao_stock_quote", obsUser, obsStart, {
               ok: false,
               error: errToString(err),
               fallbackError: errToString(fallbackErr),
@@ -1160,20 +1862,72 @@ const xiaoServicesPlugin = {
     } as AnyAgentTool);
 
     api.registerTool({
+      name: "xiao_github_trending",
+      label: "Xiao GitHub Trending",
+      description: "Fetch GitHub trending repositories from github.com/trending.",
+      parameters: githubTrendingSchema,
+      async execute(
+        _toolCallId: string,
+        params: { since?: "daily" | "weekly" | "monthly"; language?: string; limit?: number },
+      ) {
+        const obsStart = Date.now();
+        const obsUser = resolveObsUserKey(params);
+        const since = (params.since || "weekly").trim().toLowerCase();
+        const allowed = new Set(["daily", "weekly", "monthly"]);
+        if (!allowed.has(since)) {
+          return await obsWrap("xiao_github_trending", obsUser, obsStart, {
+            ok: false,
+            error: "invalid_since",
+            since,
+          });
+        }
+        const language = (params.language || "").trim();
+        const limit = clamp(Number(params.limit || 5), 1, 20);
+
+        try {
+          const items = await fetchGithubTrending({
+            since: since as "daily" | "weekly" | "monthly",
+            language,
+            limit,
+          });
+          const source = String((items[0] as { source?: string } | undefined)?.source || "trending_html");
+          return await obsWrap("xiao_github_trending", obsUser, obsStart, {
+            ok: true,
+            provider: source === "search_api" ? "github_search_api" : "github_trending_html",
+            since,
+            language,
+            count: items.length,
+            items,
+          });
+        } catch (err) {
+          return await obsWrap("xiao_github_trending", obsUser, obsStart, {
+            ok: false,
+            error: errToString(err),
+            since,
+            language,
+            limit,
+          });
+        }
+      },
+    } as AnyAgentTool);
+
+    api.registerTool({
       name: "xiao_vision_analyze",
       label: "Xiao Vision Analyze",
       description: "Analyze an image using Qwen-VL through DashScope compatible API.",
       parameters: visionSchema,
       async execute(_toolCallId: string, params: { imageUrl?: string; prompt?: string }) {
+        const obsStart = Date.now();
+        const obsUser = resolveObsUserKey(params);
         const imageUrl = (params.imageUrl || "").trim();
-        const prompt = (params.prompt || "").trim() || "Please analyze the image and summarize key points.";
+        const prompt = buildVisionPrompt(params.prompt);
         if (!imageUrl) {
-          return jsonResult({ ok: false, error: "imageUrl is required" });
+          return await obsWrap("xiao_vision_analyze", obsUser, obsStart, { ok: false, error: "invalid_input" });
         }
 
         const apiKey = env("DASHSCOPE_API_KEY");
         if (!apiKey) {
-          return jsonResult({
+          return await obsWrap("xiao_vision_analyze", obsUser, obsStart, {
             ok: false,
             error: "missing_env",
             missing: ["DASHSCOPE_API_KEY"],
@@ -1183,6 +1937,34 @@ const xiaoServicesPlugin = {
 
         const baseUrl = (env("DASHSCOPE_BASE_URL") || "https://dashscope.aliyuncs.com/compatible-mode/v1").replace(/\/$/, "");
         const model = env("QWEN_VL_MODEL") || "qwen-vl-plus-latest";
+        const timeoutMs = envTimeoutMs("XIAO_VISION_TIMEOUT_MS", 35000);
+        let resolvedImage:
+          | {
+              imageRef: string;
+              source: "data_url" | "downloaded_url";
+              mimeType: string;
+              bytes: number;
+            }
+          | null = null;
+
+        try {
+          resolvedImage = await resolveVisionImageInput(imageUrl, timeoutMs);
+        } catch (err) {
+          const errorCode = classifyToolError(err);
+          return await obsWrap("xiao_vision_analyze", obsUser, obsStart, {
+            ok: false,
+            error: errorCode,
+            errorDetail: errToString(err),
+            fallbackHint: fallbackHintForError("vision", errorCode),
+          });
+        }
+        if (!resolvedImage) {
+          return await obsWrap("xiao_vision_analyze", obsUser, obsStart, {
+            ok: false,
+            error: "tool_error",
+            fallbackHint: fallbackHintForError("vision", "tool_error"),
+          });
+        }
 
         const body = {
           model,
@@ -1191,7 +1973,7 @@ const xiaoServicesPlugin = {
               role: "user",
               content: [
                 { type: "text", text: prompt },
-                { type: "image_url", image_url: { url: imageUrl } },
+                { type: "image_url", image_url: { url: resolvedImage.imageRef } },
               ],
             },
           ],
@@ -1210,20 +1992,39 @@ const xiaoServicesPlugin = {
               },
               body: JSON.stringify(body),
             },
-            35000,
+            timeoutMs,
           )) as {
             choices?: Array<{ message?: { content?: string } }>;
           };
 
           const content = data.choices?.[0]?.message?.content || "";
-          return jsonResult({
+          if (!content.trim()) {
+            return await obsWrap("xiao_vision_analyze", obsUser, obsStart, {
+              ok: false,
+              error: "empty_response",
+              timeoutMs,
+            });
+          }
+          return await obsWrap("xiao_vision_analyze", obsUser, obsStart, {
             ok: true,
             provider: "dashscope_compatible",
             model,
+            timeoutMs,
+            imageMeta: {
+              source: resolvedImage.source,
+              mimeType: resolvedImage.mimeType,
+              bytes: resolvedImage.bytes,
+            },
             content,
           });
         } catch (err) {
-          return jsonResult({ ok: false, error: errToString(err) });
+          const errorCode = classifyToolError(err);
+          return await obsWrap("xiao_vision_analyze", obsUser, obsStart, {
+            ok: false,
+            error: errorCode,
+            errorDetail: errToString(err),
+            fallbackHint: fallbackHintForError("vision", errorCode),
+          });
         }
       },
     } as AnyAgentTool);
@@ -1244,9 +2045,11 @@ const xiaoServicesPlugin = {
           prompt?: string;
         },
       ) {
+        const obsStart = Date.now();
+        const obsUser = resolveObsUserKey(params);
         const apiKey = env("DASHSCOPE_API_KEY");
         if (!apiKey) {
-          return jsonResult({
+          return await obsWrap("xiao_asr_transcribe", obsUser, obsStart, {
             ok: false,
             error: "missing_env",
             missing: ["DASHSCOPE_API_KEY"],
@@ -1256,6 +2059,7 @@ const xiaoServicesPlugin = {
 
         const baseUrl = env("DASHSCOPE_BASE_URL") || "https://dashscope.aliyuncs.com/compatible-mode/v1";
         const model = (params.model || "").trim() || env("DASHSCOPE_ASR_MODEL") || "qwen3-asr-flash";
+        const timeoutMs = envTimeoutMs("XIAO_ASR_TIMEOUT_MS", 45000);
 
         try {
           const audio = await resolveAudioInput({
@@ -1263,11 +2067,11 @@ const xiaoServicesPlugin = {
             audioBase64: params.audioBase64,
             audioPath: params.audioPath,
           });
-          const maxBytes = 25 * 1024 * 1024;
+          const maxBytes = mediaMaxBytes();
           if (audio.bytes.byteLength > maxBytes) {
-            return jsonResult({
+            return await obsWrap("xiao_asr_transcribe", obsUser, obsStart, {
               ok: false,
-              error: "audio_too_large",
+              error: "media_too_large",
               bytes: audio.bytes.byteLength,
               maxBytes,
             });
@@ -1285,6 +2089,7 @@ const xiaoServicesPlugin = {
               audio,
               language: (params.language || "").trim() || undefined,
               prompt,
+              timeoutMs,
             });
           } catch (compatErr) {
             const fallbackModels = [model, "qwen3-asr-flash"];
@@ -1299,6 +2104,7 @@ const xiaoServicesPlugin = {
                   model: m,
                   audio,
                   prompt,
+                  timeoutMs: envTimeoutMs("XIAO_ASR_AIGC_TIMEOUT_MS", 60000),
                 });
                 usedModel = m;
                 provider = "dashscope_aigc";
@@ -1315,10 +2121,11 @@ const xiaoServicesPlugin = {
             result = resolved;
           }
 
-          return jsonResult({
+          return await obsWrap("xiao_asr_transcribe", obsUser, obsStart, {
             ok: true,
             provider,
             model: usedModel,
+            timeoutMs,
             text: result.text,
             audioMeta: {
               bytes: audio.bytes.byteLength,
@@ -1328,7 +2135,13 @@ const xiaoServicesPlugin = {
             raw: result.raw,
           });
         } catch (err) {
-          return jsonResult({ ok: false, error: errToString(err) });
+          const errorCode = classifyToolError(err);
+          return await obsWrap("xiao_asr_transcribe", obsUser, obsStart, {
+            ok: false,
+            error: errorCode,
+            errorDetail: errToString(err),
+            fallbackHint: fallbackHintForError("asr", errorCode),
+          });
         }
       },
     } as AnyAgentTool);
@@ -1346,17 +2159,22 @@ const xiaoServicesPlugin = {
           voice?: string;
           format?: string;
           instructions?: string;
+          rate?: number;
+          pitch?: number;
+          volume?: number;
           returnBase64?: boolean;
         },
       ) {
+        const obsStart = Date.now();
+        const obsUser = resolveObsUserKey(params);
         const text = (params.text || "").trim();
         if (!text) {
-          return jsonResult({ ok: false, error: "text is required" });
+          return await obsWrap("xiao_tts_synthesize", obsUser, obsStart, { ok: false, error: "invalid_input" });
         }
 
         const apiKey = env("DASHSCOPE_API_KEY");
         if (!apiKey) {
-          return jsonResult({
+          return await obsWrap("xiao_tts_synthesize", obsUser, obsStart, {
             ok: false,
             error: "missing_env",
             missing: ["DASHSCOPE_API_KEY"],
@@ -1368,6 +2186,11 @@ const xiaoServicesPlugin = {
         const model = (params.model || "").trim() || env("QWEN_TTS_MODEL") || "qwen-tts-2025-05-22";
         const voice = (params.voice || "").trim() || env("QWEN_TTS_VOICE") || "Cherry";
         const format = ((params.format || "").trim().toLowerCase() || "mp3") as "mp3" | "wav" | "ogg";
+        const timeoutMs = envTimeoutMs("XIAO_TTS_TIMEOUT_MS", 45000);
+        const rate = normalizeScale(params.rate ?? (env("QWEN_TTS_RATE") || 1), 1);
+        const pitch = normalizeScale(params.pitch ?? (env("QWEN_TTS_PITCH") || 1), 1);
+        const volume = normalizeScale(params.volume ?? (env("QWEN_TTS_VOLUME") || 1), 1);
+        const instructions = buildTtsInstruction((params.instructions || "").trim() || undefined, rate, pitch, volume);
 
         try {
           let spoken: { audioBytes: Uint8Array; mimeType: string };
@@ -1381,7 +2204,8 @@ const xiaoServicesPlugin = {
               voice,
               input: text,
               format,
-              instructions: (params.instructions || "").trim() || undefined,
+              instructions,
+              timeoutMs,
             });
           } catch (compatErr) {
             const fallbackModels = [model, "qwen-tts-2025-05-22"];
@@ -1397,6 +2221,10 @@ const xiaoServicesPlugin = {
                   voice,
                   input: text,
                   format,
+                  rate,
+                  pitch,
+                  volume,
+                  timeoutMs: envTimeoutMs("XIAO_TTS_AIGC_TIMEOUT_MS", 60000),
                 });
                 usedModel = m;
                 provider = "dashscope_aigc";
@@ -1421,6 +2249,10 @@ const xiaoServicesPlugin = {
             model: usedModel,
             voice,
             format,
+            timeoutMs,
+            rate,
+            pitch,
+            volume,
             mimeType: spoken.mimeType,
             bytes: spoken.audioBytes.byteLength,
             filePath,
@@ -1428,9 +2260,15 @@ const xiaoServicesPlugin = {
           if (params.returnBase64 === true) {
             result.audioBase64 = Buffer.from(spoken.audioBytes).toString("base64");
           }
-          return jsonResult(result);
+          return await obsWrap("xiao_tts_synthesize", obsUser, obsStart, result);
         } catch (err) {
-          return jsonResult({ ok: false, error: errToString(err) });
+          const errorCode = classifyToolError(err);
+          return await obsWrap("xiao_tts_synthesize", obsUser, obsStart, {
+            ok: false,
+            error: errorCode,
+            errorDetail: errToString(err),
+            fallbackHint: fallbackHintForError("tts", errorCode),
+          });
         }
       },
     } as AnyAgentTool);
@@ -1444,16 +2282,24 @@ const xiaoServicesPlugin = {
         _toolCallId: string,
         params: { to?: string; message?: string; minutesFromNow?: number; name?: string; channel?: string },
       ) {
+        const obsStart = Date.now();
+        const obsUser = resolveObsUserKey(params);
         const to = (params.to || "").trim();
         const message = (params.message || "").trim();
         const minutesFromNow = clamp(Number(params.minutesFromNow || 0), 1, 43200);
         const channel = (params.channel || "").trim() || "qqbot";
 
         if (!to) {
-          return jsonResult({ ok: false, error: "to is required" });
+          return await obsWrap("xiao_schedule_reminder", obsUser, obsStart, {
+            ok: false,
+            error: "to is required",
+          });
         }
         if (!message) {
-          return jsonResult({ ok: false, error: "message is required" });
+          return await obsWrap("xiao_schedule_reminder", obsUser, obsStart, {
+            ok: false,
+            error: "message is required",
+          });
         }
 
         const name =
@@ -1494,13 +2340,13 @@ const xiaoServicesPlugin = {
               parsed = { stdout: out, stderr: (stderr || "").trim() };
             }
           }
-          return jsonResult({
+          return await obsWrap("xiao_schedule_reminder", obsUser, obsStart, {
             ok: true,
             cron: parsed,
             args,
           });
         } catch (err) {
-          return jsonResult({
+          return await obsWrap("xiao_schedule_reminder", obsUser, obsStart, {
             ok: false,
             error: errToString(err),
             args,
@@ -1515,11 +2361,15 @@ const xiaoServicesPlugin = {
       description: "Probe external APIs used by xiao-services and report availability.",
       parameters: emptySchema,
       async execute() {
+        const obsStart = Date.now();
         try {
           const report = await runServiceProbe();
-          return jsonResult({ ok: true, report });
+          return await obsWrap("xiao_service_probe", "system:probe", obsStart, { ok: true, report });
         } catch (err) {
-          return jsonResult({ ok: false, error: errToString(err) });
+          return await obsWrap("xiao_service_probe", "system:probe", obsStart, {
+            ok: false,
+            error: errToString(err),
+          });
         }
       },
     } as AnyAgentTool);
@@ -1546,8 +2396,10 @@ const xiaoServicesPlugin = {
         const lines: string[] = [];
         lines.push("xiao-services tools loaded:");
         lines.push("- xiao_search_google");
+        lines.push("- xiao_url_digest");
         lines.push("- xiao_weather_openmeteo");
         lines.push("- xiao_stock_quote");
+        lines.push("- xiao_github_trending");
         lines.push("- xiao_vision_analyze");
         lines.push("- xiao_asr_transcribe");
         lines.push("- xiao_tts_synthesize");
@@ -1555,14 +2407,24 @@ const xiaoServicesPlugin = {
         lines.push("- xiao_service_probe");
         lines.push("");
         lines.push(`env file: ${resolveEnvFilePath()}`);
+        lines.push(`obs file: ${resolveObsFilePath()}`);
         lines.push("");
         lines.push("env status:");
         lines.push(`- GOOGLE_CSE_API_KEY: ${env("GOOGLE_CSE_API_KEY") ? "set" : "missing"}`);
         lines.push(`- GOOGLE_CSE_CX: ${env("GOOGLE_CSE_CX") ? "set" : "missing"}`);
+        lines.push(`- GITHUB_TRENDING_PROXY: ${env("GITHUB_TRENDING_PROXY") ? "set" : "missing(optional)"}`);
         lines.push(`- DASHSCOPE_API_KEY: ${env("DASHSCOPE_API_KEY") ? "set" : "missing"}`);
         lines.push(`- DASHSCOPE_ASR_MODEL: ${env("DASHSCOPE_ASR_MODEL") || "(default: qwen3-asr-flash)"}`);
         lines.push(`- QWEN_TTS_MODEL: ${env("QWEN_TTS_MODEL") || "(default: qwen-tts-2025-05-22)"}`);
         lines.push(`- QWEN_TTS_VOICE: ${env("QWEN_TTS_VOICE") || "(default: Cherry)"}`);
+        lines.push(`- QWEN_TTS_RATE: ${env("QWEN_TTS_RATE") || "(default: 1.0)"}`);
+        lines.push(`- QWEN_TTS_PITCH: ${env("QWEN_TTS_PITCH") || "(default: 1.0)"}`);
+        lines.push(`- QWEN_TTS_VOLUME: ${env("QWEN_TTS_VOLUME") || "(default: 1.0)"}`);
+        lines.push(`- XIAO_MEDIA_MAX_MB: ${env("XIAO_MEDIA_MAX_MB") || "(default: 20)"}`);
+        lines.push(`- XIAO_VISION_TIMEOUT_MS: ${env("XIAO_VISION_TIMEOUT_MS") || "(default: 35000)"}`);
+        lines.push(`- XIAO_VISION_DEFAULT_PROMPT: ${env("XIAO_VISION_DEFAULT_PROMPT") ? "set" : "using built-in"}`);
+        lines.push(`- XIAO_ASR_TIMEOUT_MS: ${env("XIAO_ASR_TIMEOUT_MS") || "(default: 45000)"}`);
+        lines.push(`- XIAO_TTS_TIMEOUT_MS: ${env("XIAO_TTS_TIMEOUT_MS") || "(default: 45000)"}`);
         return { text: lines.join("\n") };
       },
     });

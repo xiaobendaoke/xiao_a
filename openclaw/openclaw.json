@@ -77,13 +77,17 @@
   "plugins": {
     "allow": [
       "xiao-services",
-      "xiao-emotion"
+      "xiao-emotion",
+      "xiao-core"
     ],
     "entries": {
       "xiao-services": {
         "enabled": true
       },
       "xiao-emotion": {
+        "enabled": true
+      },
+      "xiao-core": {
         "enabled": true
       }
     }
