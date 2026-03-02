@@ -28,13 +28,13 @@
     "defaults": {
       "workspace": "~/.openclaw/workspace",
       "model": {
-        "primary": "deepseek/deepseek-chat"
+        "primary": "siliconflow/deepseek-ai/DeepSeek-V3.2"
       },
       "models": {
-        "deepseek/deepseek-chat": {
+        "siliconflow/deepseek-ai/DeepSeek-V3.2": {
           "alias": "deepseek-chat"
         },
-        "deepseek/deepseek-reasoner": {
+        "siliconflow/deepseek-ai/DeepSeek-R1": {
           "alias": "deepseek-reasoner"
         }
       }
@@ -44,20 +44,20 @@
         "id": "main",
         "default": true,
         "name": "Main Agent",
-        "model": "deepseek/deepseek-chat"
+        "model": "siliconflow/deepseek-ai/DeepSeek-V3.2"
       }
     ]
   },
   "models": {
     "mode": "merge",
     "providers": {
-      "deepseek": {
-        "baseUrl": "https://api.deepseek.com/v1",
-        "apiKey": "${DEEPSEEK_API_KEY}",
+      "siliconflow": {
+        "baseUrl": "${SILICONFLOW_BASE_URL}",
+        "apiKey": "${SILICONFLOW_API_KEY}",
         "api": "openai-completions",
         "models": [
-          { "id": "deepseek-chat", "name": "DeepSeek Chat" },
-          { "id": "deepseek-reasoner", "name": "DeepSeek Reasoner" }
+          { "id": "deepseek-ai/DeepSeek-V3.2", "name": "DeepSeek-V3.2" },
+          { "id": "deepseek-ai/DeepSeek-R1", "name": "DeepSeek-R1" }
         ]
       }
     }

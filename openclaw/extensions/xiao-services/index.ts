@@ -1,144 +1,25 @@
-import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync, statSync } from "node:fs";
-import { promises as fs } from "node:fs";
-import { homedir, tmpdir } from "node:os";
-import path from "node:path";
-import { promisify } from "node:util";
-import type { AnyAgentTool, OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { OpenClawPluginApi, AnyAgentTool } from "openclaw/plugin-sdk";
 import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
+import { randomUUID } from "node:crypto";
+import path from "node:path";
+import { promises as fs } from "node:fs";
+import { tmpdir } from "node:os";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+import { env, envAny } from "../shared/env.js";
+import { errToString, clamp } from "../shared/text.js";
+import { fetchJson, fetchJsonByCurl, fetchTextByCurl } from "../shared/request.js";
+
+// Feature modules
+import { normalizeStockSymbol, fetchStockEastmoney, fetchStockSina } from "./features/stock.js";
+import { fetchGithubTrending } from "./features/github.js";
+import { callAsrOpenAICompat, callTtsOpenAICompat } from "./features/openai.js";
+import { callAsrDashscopeAigc, callTtsDashscopeAigc } from "./features/dashscope.js";
+import { resolveVisionImageInput, resolveAudioInput, extFromMime } from "./features/media.js";
+import { obsWrap, jsonResult, resolveObsUserKey, resolveObsFilePath } from "./features/obs.js";
 
 const execFileAsync = promisify(execFile);
-
-type ToolResult = {
-  content: Array<{ type: "text"; text: string }>;
-  details: unknown;
-};
-
-type ProbeStatus = "ok" | "fail" | "skip";
-type ObsMetric = {
-  ts: string;
-  request_id: string;
-  user_key: string;
-  tool_name: string;
-  latency_ms: number;
-  error_code: string;
-};
-
-let xiaoEnvCache: Record<string, string> | null = null;
-let xiaoEnvMtimeMs = -1;
-
-function resolveEnvFilePath(): string {
-  const fromEnv = (process.env.XIAO_ENV_FILE || "").trim();
-  if (fromEnv) {
-    return fromEnv;
-  }
-  return path.join(homedir(), ".openclaw", ".env");
-}
-
-function unquoteEnvValue(value: string): string {
-  const v = value.trim();
-  if (
-    (v.startsWith("\"") && v.endsWith("\"") && v.length >= 2) ||
-    (v.startsWith("'") && v.endsWith("'") && v.length >= 2)
-  ) {
-    return v.slice(1, -1).trim();
-  }
-  return v;
-}
-
-function loadXiaoEnvFile(): Record<string, string> {
-  const file = resolveEnvFilePath();
-  if (!existsSync(file)) {
-    xiaoEnvCache = {};
-    xiaoEnvMtimeMs = -1;
-    return xiaoEnvCache;
-  }
-
-  try {
-    const stat = statSync(file);
-    if (xiaoEnvCache && xiaoEnvMtimeMs === stat.mtimeMs) {
-      return xiaoEnvCache;
-    }
-
-    const content = readFileSync(file, "utf8");
-    const parsed: Record<string, string> = {};
-    for (const rawLine of content.split(/\r?\n/)) {
-      const line = rawLine.trim();
-      if (!line || line.startsWith("#")) {
-        continue;
-      }
-      const idx = line.indexOf("=");
-      if (idx <= 0) {
-        continue;
-      }
-      const key = line.slice(0, idx).trim();
-      const value = unquoteEnvValue(line.slice(idx + 1));
-      if (!key) {
-        continue;
-      }
-      parsed[key] = value;
-    }
-
-    xiaoEnvCache = parsed;
-    xiaoEnvMtimeMs = stat.mtimeMs;
-    return parsed;
-  } catch {
-    xiaoEnvCache = {};
-    xiaoEnvMtimeMs = -1;
-    return xiaoEnvCache;
-  }
-}
-
-function env(name: string): string {
-  const runtime = (process.env[name] || "").trim();
-  if (runtime) {
-    return runtime;
-  }
-  const fileEnv = loadXiaoEnvFile();
-  return (fileEnv[name] || "").trim();
-}
-
-function envAny(names: string[]): string {
-  for (const name of names) {
-    const runtime = (process.env[name] || "").trim();
-    if (runtime) {
-      return runtime;
-    }
-  }
-  const fileEnv = loadXiaoEnvFile();
-  for (const name of names) {
-    const fileValue = (fileEnv[name] || "").trim();
-    if (fileValue) {
-      return fileValue;
-    }
-  }
-  return "";
-}
-
-function errToString(err: unknown): string {
-  if (err instanceof Error) {
-    return err.message;
-  }
-  return String(err);
-}
-
-function jsonResult(payload: unknown): ToolResult {
-  return {
-    content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
-    details: payload,
-  };
-}
-
-function clamp(n: number, lo: number, hi: number): number {
-  return Math.max(lo, Math.min(hi, n));
-}
-
-function mediaMaxBytes(): number {
-  const mbRaw = env("XIAO_MEDIA_MAX_MB") || "20";
-  const mb = clamp(Number(mbRaw), 1, 200);
-  return Math.trunc(mb * 1024 * 1024);
-}
 
 function envTimeoutMs(name: string, defaultMs: number): number {
   const raw = env(name);
@@ -220,461 +101,12 @@ function buildVisionPrompt(prompt?: string): string {
   return `${base}\n用户补充要求：${custom}`;
 }
 
-function resolveObsFilePath(): string {
-  const fromEnv = (process.env.XIAO_OBS_FILE || "").trim();
-  if (fromEnv) {
-    return fromEnv;
-  }
-  return path.join(homedir(), ".openclaw", "xiao-core", "observability.jsonl");
-}
-
-function resolveObsUserKey(params: unknown): string {
-  const p = (params || {}) as Record<string, unknown>;
-  const raw =
-    (typeof p.userKey === "string" && p.userKey.trim()) ||
-    (typeof p.to === "string" && p.to.trim()) ||
-    "unknown";
-  const qq = raw.match(/^qqbot:(?:c2c|group):([A-Za-z0-9._:-]{6,128})$/i);
-  if (qq?.[1]) {
-    return `qqbot:${qq[1]}`;
-  }
-  return raw.slice(0, 160);
-}
-
-async function writeObsMetric(metric: ObsMetric): Promise<void> {
-  try {
-    const file = resolveObsFilePath();
-    await fs.mkdir(path.dirname(file), { recursive: true });
-    await fs.appendFile(file, `${JSON.stringify(metric)}\n`, "utf8");
-  } catch {
-    // best effort metrics logging
-  }
-}
-
-async function obsWrap(toolName: string, userKey: string, startedAt: number, payload: unknown): Promise<ToolResult> {
-  const obj = (payload || {}) as Record<string, unknown>;
-  const errorCode =
-    obj && obj.ok === false ? String(obj.error || "tool_error").slice(0, 120) : "";
-  await writeObsMetric({
-    ts: new Date().toISOString(),
-    request_id: randomUUID(),
-    user_key: userKey || "unknown",
-    tool_name: toolName,
-    latency_ms: Math.max(0, Date.now() - startedAt),
-    error_code: errorCode,
-  });
-  return jsonResult(payload);
-}
-
-function resolveDashscopeAigcEndpoint(baseUrl: string): string {
-  const fallback = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation";
-  try {
-    const u = new URL(baseUrl);
-    return `${u.origin}/api/v1/services/aigc/multimodal-generation/generation`;
-  } catch {
-    return fallback;
-  }
-}
-
-async function fetchJson(url: string, init?: RequestInit, timeoutMs: number = 12000): Promise<unknown> {
-  const res = await fetch(url, {
-    ...init,
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  const text = await res.text();
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status}: ${text.slice(0, 300)}`);
-  }
-  if (!text) {
-    return {};
-  }
-  try {
-    return JSON.parse(text);
-  } catch {
-    return { raw: text };
-  }
-}
-
-async function fetchJsonByCurl(params: {
-  url: string;
-  timeoutSec?: number;
-  proxy?: string;
-  headers?: Record<string, string>;
-}): Promise<unknown> {
-  const timeoutSec = clamp(Number(params.timeoutSec || 20), 3, 120);
-  const args: string[] = ["-sS", "-L", "--fail-with-body", "--max-time", String(timeoutSec)];
-  const proxy = (params.proxy || "").trim();
-  if (proxy) {
-    args.push("-x", proxy);
-  }
-  for (const [k, v] of Object.entries(params.headers || {})) {
-    args.push("-H", `${k}: ${v}`);
-  }
-  args.push(params.url);
-
-  try {
-    const { stdout } = await execFileAsync("curl", args, {
-      timeout: timeoutSec * 1000 + 3000,
-      maxBuffer: 8 * 1024 * 1024,
-      env: {
-        ...process.env,
-        // Avoid inheriting stale process-wide proxies; use explicit proxy only.
-        HTTP_PROXY: proxy || "",
-        HTTPS_PROXY: proxy || "",
-        ALL_PROXY: proxy || "",
-        http_proxy: proxy || "",
-        https_proxy: proxy || "",
-        all_proxy: proxy || "",
-      },
-    });
-    const text = (stdout || "").trim();
-    if (!text) {
-      return {};
-    }
-    try {
-      return JSON.parse(text);
-    } catch {
-      return { raw: text };
-    }
-  } catch (err) {
-    const e = err as Error & { stdout?: string; stderr?: string };
-    const msg = `${(e.stderr || "").trim()} ${(e.stdout || "").trim()}`.trim() || errToString(err);
-    throw new Error(`curl request failed: ${msg.slice(0, 300)}`);
-  }
-}
-
-async function fetchTextByCurl(params: {
-  url: string;
-  timeoutSec?: number;
-  proxy?: string;
-  headers?: Record<string, string>;
-  compressed?: boolean;
-}): Promise<string> {
-  const timeoutSec = clamp(Number(params.timeoutSec || 20), 3, 120);
-  const args: string[] = ["-sS", "-L", "--fail-with-body", "--max-time", String(timeoutSec)];
-  if (params.compressed === true) {
-    args.push("--compressed");
-  }
-  const proxy = (params.proxy || "").trim();
-  if (proxy) {
-    args.push("-x", proxy);
-  }
-  for (const [k, v] of Object.entries(params.headers || {})) {
-    args.push("-H", `${k}: ${v}`);
-  }
-  args.push(params.url);
-
-  try {
-    const { stdout } = await execFileAsync("curl", args, {
-      timeout: timeoutSec * 1000 + 3000,
-      maxBuffer: 8 * 1024 * 1024,
-      env: {
-        ...process.env,
-        HTTP_PROXY: proxy || "",
-        HTTPS_PROXY: proxy || "",
-        ALL_PROXY: proxy || "",
-        http_proxy: proxy || "",
-        https_proxy: proxy || "",
-        all_proxy: proxy || "",
-      },
-    });
-    return String(stdout || "");
-  } catch (err) {
-    const e = err as Error & { stdout?: string; stderr?: string };
-    const msg = `${(e.stderr || "").trim()} ${(e.stdout || "").trim()}`.trim() || errToString(err);
-    throw new Error(`curl request failed: ${msg.slice(0, 300)}`);
-  }
-}
-
-function isoDateDaysAgo(days: number): string {
-  const d = new Date(Date.now() - Math.max(0, days) * 24 * 60 * 60 * 1000);
-  return d.toISOString().slice(0, 10);
-}
-
-async function fetchGithubTrendingBySearchApi(params: {
-  since: "daily" | "weekly" | "monthly";
-  language?: string;
-  limit: number;
-}): Promise<
-  Array<{
-    repo: string;
-    url: string;
-    description: string;
-    language: string;
-    starsTotal: number | null;
-    starsPeriod: number | null;
-    since: "daily" | "weekly" | "monthly";
-    source: "search_api";
-  }>
-> {
-  const since = params.since;
-  const language = (params.language || "").trim();
-  const limit = clamp(params.limit, 1, 20);
-  const days = since === "daily" ? 1 : since === "monthly" ? 30 : 7;
-
-  const queryParts = [`created:>=${isoDateDaysAgo(days)}`];
-  if (language) {
-    queryParts.push(`language:${language}`);
-  }
-
-  const url = new URL("https://api.github.com/search/repositories");
-  url.searchParams.set("q", queryParts.join(" "));
-  url.searchParams.set("sort", "stars");
-  url.searchParams.set("order", "desc");
-  url.searchParams.set("per_page", String(limit));
-
-  const proxy = envAny([
-    "GITHUB_TRENDING_PROXY",
-    "HTTPS_PROXY",
-    "HTTP_PROXY",
-    "https_proxy",
-    "http_proxy",
-    "ALL_PROXY",
-    "all_proxy",
-  ]);
-  const token = env("GITHUB_TOKEN");
-
-  const headers: Record<string, string> = {
-    Accept: "application/vnd.github+json",
-    "User-Agent": "xiao-a-openclaw",
-    "X-GitHub-Api-Version": "2022-11-28",
-  };
-  if (token) {
-    headers.Authorization = `Bearer ${token}`;
-  }
-
-  const data = (await fetchJsonByCurl({
-    url: url.toString(),
-    timeoutSec: 20,
-    proxy: proxy || undefined,
-    headers,
-  })) as {
-    items?: Array<{
-      full_name?: string;
-      html_url?: string;
-      description?: string | null;
-      language?: string | null;
-      stargazers_count?: number;
-    }>;
-    message?: string;
-  };
-
-  const items = Array.isArray(data.items) ? data.items : [];
-  return items.slice(0, limit).map((it) => {
-    const repo = String(it.full_name || "").trim();
-    return {
-      repo,
-      url: String(it.html_url || `https://github.com/${repo}`),
-      description: cleanText(it.description || "", 260),
-      language: String(it.language || "").trim(),
-      starsTotal: Number.isFinite(Number(it.stargazers_count)) ? Number(it.stargazers_count) : null,
-      starsPeriod: null,
-      since,
-      source: "search_api" as const,
-    };
-  });
-}
-
-async function fetchBytes(
-  url: string,
-  init?: RequestInit,
-  timeoutMs: number = 15000,
-): Promise<{ bytes: Uint8Array; contentType: string }> {
-  const res = await fetch(url, {
-    ...init,
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`HTTP ${res.status}: ${text.slice(0, 300)}`);
-  }
-  const maxBytes = mediaMaxBytes();
-  const contentLength = Number(res.headers.get("content-length") || 0);
-  if (Number.isFinite(contentLength) && contentLength > 0 && contentLength > maxBytes) {
-    throw new Error(`media_too_large: content-length=${contentLength} > max=${maxBytes}`);
-  }
-  const contentType = res.headers.get("content-type") || "application/octet-stream";
-  const ab = await res.arrayBuffer();
-  if (ab.byteLength > maxBytes) {
-    throw new Error(`media_too_large: bytes=${ab.byteLength} > max=${maxBytes}`);
-  }
-  return {
-    bytes: new Uint8Array(ab),
-    contentType,
-  };
-}
-
-function extFromMime(mimeType: string): string {
-  const mime = (mimeType || "").toLowerCase();
-  if (mime.includes("mpeg") || mime.includes("mp3")) return "mp3";
-  if (mime.includes("wav")) return "wav";
-  if (mime.includes("ogg")) return "ogg";
-  if (mime.includes("webm")) return "webm";
-  if (mime.includes("aac")) return "aac";
-  if (mime.includes("flac")) return "flac";
-  if (mime.includes("m4a") || mime.includes("mp4")) return "m4a";
-  return "bin";
-}
-
-function mimeFromPath(filePath: string): string {
-  const ext = path.extname(filePath).toLowerCase();
-  if (ext === ".mp3") return "audio/mpeg";
-  if (ext === ".wav") return "audio/wav";
-  if (ext === ".ogg") return "audio/ogg";
-  if (ext === ".webm") return "audio/webm";
-  if (ext === ".aac") return "audio/aac";
-  if (ext === ".flac") return "audio/flac";
-  if (ext === ".m4a" || ext === ".mp4") return "audio/mp4";
-  return "application/octet-stream";
-}
-
-function normalizeStockSymbol(input: string): { code: string; market: "SH" | "SZ" } | null {
-  const t = (input || "").trim().toUpperCase();
-  if (!t) {
-    return null;
-  }
-
-  const matchTs = t.match(/^(\d{6})\.(SH|SZ)$/);
-  if (matchTs) {
-    return { code: matchTs[1], market: matchTs[2] as "SH" | "SZ" };
-  }
-
-  const matchPrefixed = t.match(/^(SH|SZ)(\d{6})$/);
-  if (matchPrefixed) {
-    return { code: matchPrefixed[2], market: matchPrefixed[1] as "SH" | "SZ" };
-  }
-
-  const matchCode = t.match(/(\d{6})/);
-  if (!matchCode) {
-    return null;
-  }
-
-  const code = matchCode[1];
-  const market = code.startsWith("6") ? "SH" : "SZ";
-  return { code, market };
-}
-
-async function fetchStockEastmoney(normalized: {
-  code: string;
-  market: "SH" | "SZ";
-}): Promise<{
-  provider: "eastmoney";
-  symbol: string;
-  name: string;
-  quote: {
-    price: number;
-    preclose: number;
-    open: number;
-    high: number;
-    low: number;
-    pctChange: number;
-    volume: number;
-    amount: number;
-  };
-}> {
-  const secid = `${normalized.market === "SH" ? "1" : "0"}.${normalized.code}`;
-  const url =
-    "https://push2.eastmoney.com/api/qt/stock/get" +
-    `?secid=${encodeURIComponent(secid)}` +
-    "&fields=f57,f58,f43,f44,f45,f46,f47,f48,f60,f169";
-  const data = (await fetchJson(url, undefined, 8000)) as { data?: Record<string, number | string> };
-  const d = data.data || {};
-  const price = Number(d.f43 || 0) / 100;
-  if (!Number.isFinite(price) || price <= 0) {
-    throw new Error("eastmoney returned empty quote");
-  }
-  return {
-    provider: "eastmoney",
-    symbol: `${normalized.code}.${normalized.market}`,
-    name: String(d.f58 || "").trim(),
-    quote: {
-      price,
-      preclose: Number(d.f60 || 0) / 100,
-      open: Number(d.f46 || 0) / 100,
-      high: Number(d.f44 || 0) / 100,
-      low: Number(d.f45 || 0) / 100,
-      pctChange: Number(d.f169 || 0) / 100,
-      volume: Number(d.f47 || 0),
-      amount: Number(d.f48 || 0),
-    },
-  };
-}
-
-async function fetchStockSina(normalized: {
-  code: string;
-  market: "SH" | "SZ";
-}): Promise<{
-  provider: "sina";
-  symbol: string;
-  name: string;
-  quote: {
-    price: number;
-    preclose: number;
-    open: number;
-    high: number;
-    low: number;
-    pctChange: number;
-    volume: number;
-    amount: number;
-  };
-}> {
-  const symbol = `${normalized.market.toLowerCase()}${normalized.code}`;
-  const url = `https://hq.sinajs.cn/list=${encodeURIComponent(symbol)}`;
-  const res = await fetch(url, {
-    method: "GET",
-    headers: {
-      "User-Agent": "Mozilla/5.0",
-      Referer: "https://finance.sina.com.cn/",
-    },
-    signal: AbortSignal.timeout(8000),
-  });
-  const rawBody = new Uint8Array(await res.arrayBuffer());
-  let body = "";
-  try {
-    body = new TextDecoder("gb18030").decode(rawBody);
-  } catch {
-    body = new TextDecoder("utf-8").decode(rawBody);
-  }
-  if (!res.ok) {
-    throw new Error(`sina HTTP ${res.status}`);
-  }
-  const payloadMatch = body.match(/=\"([^\"]+)\"/);
-  if (!payloadMatch?.[1]) {
-    throw new Error("sina response parse failed");
-  }
-  const parts = payloadMatch[1].split(",");
-  if (parts.length < 10) {
-    throw new Error("sina quote fields insufficient");
-  }
-
-  const name = (parts[0] || "").trim() || `${normalized.code}.${normalized.market}`;
-  const open = Number(parts[1] || 0);
-  const preclose = Number(parts[2] || 0);
-  const price = Number(parts[3] || 0);
-  const high = Number(parts[4] || 0);
-  const low = Number(parts[5] || 0);
-  const volume = Number(parts[8] || 0);
-  const amount = Number(parts[9] || 0);
-  if (!Number.isFinite(price) || price <= 0) {
-    throw new Error("sina returned empty quote");
-  }
-  const pctChange = preclose > 0 ? ((price - preclose) / preclose) * 100 : 0;
-
-  return {
-    provider: "sina",
-    symbol: `${normalized.code}.${normalized.market}`,
-    name,
-    quote: {
-      price,
-      preclose,
-      open,
-      high,
-      low,
-      pctChange,
-      volume,
-      amount,
-    },
-  };
+async function writeTempAudioFile(bytes: Uint8Array, ext: string): Promise<string> {
+  const dir = path.join(tmpdir(), "openclaw-xiao-services");
+  await fs.mkdir(dir, { recursive: true });
+  const filePath = path.join(dir, `tts-${Date.now()}-${randomUUID()}.${ext}`);
+  await fs.writeFile(filePath, Buffer.from(bytes));
+  return filePath;
 }
 
 function weatherCodeToText(code: unknown): string {
@@ -786,546 +218,50 @@ function extractReadableFromHtml(html: string, maxChars: number): string {
   return cleanText(joined || plain, maxChars);
 }
 
-async function fetchGithubTrending(params: {
-  since: "daily" | "weekly" | "monthly";
-  language?: string;
-  limit: number;
-}): Promise<
-  Array<{
-    repo: string;
-    url: string;
-    description: string;
-    language: string;
-    starsTotal: number | null;
-    starsPeriod: number | null;
-    since: "daily" | "weekly" | "monthly";
-    source: "trending_html" | "search_api";
-  }>
-> {
-  const since = params.since;
-  const language = (params.language || "").trim().toLowerCase();
-  const limit = clamp(params.limit, 1, 20);
-  const langPath = language ? `/${encodeURIComponent(language)}` : "";
-  const url = `https://github.com/trending${langPath}?since=${since}`;
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
-  const proxy = envAny([
-    "GITHUB_TRENDING_PROXY",
-    "HTTPS_PROXY",
-    "HTTP_PROXY",
-    "https_proxy",
-    "http_proxy",
-    "ALL_PROXY",
-    "all_proxy",
-  ]);
+async function fetchUrlDigestHtml(url: string, timeoutSec: number): Promise<string> {
+  const headers = {
+    "User-Agent":
+      "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    Accept: "text/html,application/xhtml+xml",
+  };
+  let lastErr: unknown = null;
 
-  try {
-    const html = await fetchTextByCurl({
-      url,
-      timeoutSec: 35,
-      compressed: true,
-      proxy: proxy || undefined,
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-        Accept: "text/html,application/xhtml+xml",
-        Referer: "https://github.com/trending",
-      },
-    });
-
-    const articleRegex = /<article[\s\S]*?<\/article>/g;
-    const rows = (html.match(articleRegex) || [])
-      .filter((row) => /Box-row/.test(row))
-      .slice(0, Math.max(limit * 3, 20));
-
-    const out: Array<{
-      repo: string;
-      url: string;
-      description: string;
-      language: string;
-      starsTotal: number | null;
-      starsPeriod: number | null;
-      since: "daily" | "weekly" | "monthly";
-      source: "trending_html" | "search_api";
-    }> = [];
-
-    const seen = new Set<string>();
-    for (const row of rows) {
-      const repoMatch = row.match(/<h2[\s\S]*?<a[^>]*href="\/([^"?#]+)"/i);
-      const repo = cleanText(repoMatch?.[1] || "", 120).replace(/\s+/g, "");
-      if (!repo || !repo.includes("/") || seen.has(repo)) {
-        continue;
-      }
-
-      const descMatch = row.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
-      const description = cleanText(descMatch?.[1] || "", 260);
-
-      const langMatch = row.match(/itemprop="programmingLanguage"[^>]*>([\s\S]*?)<\/span>/i);
-      const repoLang = cleanText(langMatch?.[1] || "", 60);
-
-      const starTotalMatch = row.match(/href="\/[^"?#]+\/stargazers"[^>]*>\s*([\d,]+)\s*<\/a>/i);
-      const starsTotal = starTotalMatch?.[1] ? Number(starTotalMatch[1].replace(/,/g, "")) : null;
-
-      const starPeriodMatch = row.match(/([\d,]+)\s+stars?\s+(today|this week|this month)/i);
-      const starsPeriod = starPeriodMatch?.[1] ? Number(starPeriodMatch[1].replace(/,/g, "")) : null;
-
-      seen.add(repo);
-      out.push({
-        repo,
-        url: `https://github.com/${repo}`,
-        description,
-        language: repoLang || "",
-        starsTotal: Number.isFinite(starsTotal) ? starsTotal : null,
-        starsPeriod: Number.isFinite(starsPeriod) ? starsPeriod : null,
-        since,
-        source: "trending_html",
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      return await fetchTextByCurl({
+        url,
+        timeoutSec,
+        compressed: true,
+        headers,
       });
-
-      if (out.length >= limit) {
-        break;
+    } catch (err) {
+      lastErr = err;
+      if (attempt < 2) {
+        await sleepMs(400);
       }
     }
-
-    if (out.length > 0) {
-      return out;
-    }
-  } catch {
-    // fallback below
   }
 
-  return await fetchGithubTrendingBySearchApi({
-    since,
-    language,
-    limit,
-  });
-}
-
-function parseBase64AudioInput(input: string): {
-  bytes: Uint8Array;
-  mimeType: string;
-  filename: string;
-} {
-  const text = (input || "").trim();
-  if (!text) {
-    throw new Error("audioBase64 is empty");
-  }
-
-  const dataUrlMatch = text.match(/^data:([^;]+);base64,(.+)$/i);
-  if (dataUrlMatch) {
-    const mimeType = dataUrlMatch[1] || "application/octet-stream";
-    const b64 = dataUrlMatch[2] || "";
-    const bytes = Buffer.from(b64, "base64");
-    const ext = extFromMime(mimeType);
-    return {
-      bytes: new Uint8Array(bytes),
-      mimeType,
-      filename: `audio.${ext}`,
-    };
-  }
-
-  const bytes = Buffer.from(text, "base64");
-  if (!bytes.length) {
-    throw new Error("invalid base64 audio input");
-  }
-  return {
-    bytes: new Uint8Array(bytes),
-    mimeType: "application/octet-stream",
-    filename: "audio.bin",
-  };
-}
-
-function parseBase64ImageInput(input: string): {
-  bytes: Uint8Array;
-  mimeType: string;
-} {
-  const text = (input || "").trim();
-  if (!text) {
-    throw new Error("invalid_input: imageUrl is empty");
-  }
-  const dataUrlMatch = text.match(/^data:([^;]+);base64,(.+)$/i);
-  if (!dataUrlMatch?.[1] || !dataUrlMatch?.[2]) {
-    throw new Error("invalid_input: imageUrl must be a valid image URL or data URL");
-  }
-  const mimeType = (dataUrlMatch[1] || "application/octet-stream").trim().toLowerCase();
-  if (!mimeType.startsWith("image/")) {
-    throw new Error(`unsupported_media_type: ${mimeType}`);
-  }
-  const bytes = Buffer.from(dataUrlMatch[2], "base64");
-  if (!bytes.length) {
-    throw new Error("invalid_input: image data is empty");
-  }
-  const maxBytes = mediaMaxBytes();
-  if (bytes.byteLength > maxBytes) {
-    throw new Error(`media_too_large: bytes=${bytes.byteLength} > max=${maxBytes}`);
-  }
-  return {
-    bytes: new Uint8Array(bytes),
-    mimeType,
-  };
-}
-
-async function resolveVisionImageInput(imageUrl: string, timeoutMs: number): Promise<{
-  imageRef: string;
-  source: "data_url" | "downloaded_url";
-  mimeType: string;
-  bytes: number;
-}> {
-  const raw = (imageUrl || "").trim();
-  if (!raw) {
-    throw new Error("invalid_input: imageUrl is required");
-  }
-
-  if (/^data:/i.test(raw)) {
-    const parsed = parseBase64ImageInput(raw);
-    return {
-      imageRef: raw,
-      source: "data_url",
-      mimeType: parsed.mimeType,
-      bytes: parsed.bytes.byteLength,
-    };
-  }
-
-  let urlObj: URL;
   try {
-    urlObj = new URL(raw);
-  } catch {
-    throw new Error("invalid_input: imageUrl is not a valid URL");
-  }
-  if (!/^https?:$/i.test(urlObj.protocol)) {
-    throw new Error("invalid_input: imageUrl must use http/https");
-  }
-
-  const downloaded = await fetchBytes(raw, undefined, clamp(Math.trunc(timeoutMs * 0.7), 6000, 30000));
-  const mimeType = (downloaded.contentType || "").toLowerCase();
-  if (!mimeType.startsWith("image/")) {
-    throw new Error(`unsupported_media_type: ${mimeType || "unknown"}`);
-  }
-  const dataUrl = `data:${mimeType};base64,${Buffer.from(downloaded.bytes).toString("base64")}`;
-  return {
-    imageRef: dataUrl,
-    source: "downloaded_url",
-    mimeType,
-    bytes: downloaded.bytes.byteLength,
-  };
-}
-
-async function resolveAudioInput(params: {
-  audioUrl?: string;
-  audioBase64?: string;
-  audioPath?: string;
-}): Promise<{ bytes: Uint8Array; mimeType: string; filename: string }> {
-  const audioUrl = (params.audioUrl || "").trim();
-  const audioBase64 = (params.audioBase64 || "").trim();
-  const audioPath = (params.audioPath || "").trim();
-
-  if (!audioUrl && !audioBase64 && !audioPath) {
-    throw new Error("audioUrl or audioBase64 or audioPath is required");
-  }
-
-  if (audioUrl) {
-    const downloaded = await fetchBytes(audioUrl, undefined, 25000);
-    const ext = extFromMime(downloaded.contentType);
-    return {
-      bytes: downloaded.bytes,
-      mimeType: downloaded.contentType,
-      filename: `audio.${ext}`,
-    };
-  }
-
-  if (audioPath) {
-    const absolutePath = path.resolve(audioPath);
-    const st = await fs.stat(absolutePath);
-    const maxBytes = mediaMaxBytes();
-    if (st.size > maxBytes) {
-      throw new Error(`media_too_large: file=${st.size} > max=${maxBytes}`);
+    const res = await fetch(url, {
+      method: "GET",
+      headers,
+      signal: AbortSignal.timeout(timeoutSec * 1000),
+    });
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
     }
-    const fileBytes = await fs.readFile(absolutePath);
-    if (!fileBytes.byteLength) {
-      throw new Error("audioPath points to empty file");
-    }
-    const mimeType = mimeFromPath(absolutePath);
-    return {
-      bytes: new Uint8Array(fileBytes),
-      mimeType,
-      filename: path.basename(absolutePath) || `audio.${extFromMime(mimeType)}`,
-    };
+    return await res.text();
+  } catch (fallbackErr) {
+    throw new Error(`url_fetch_failed: curl=${errToString(lastErr)}; fetch=${errToString(fallbackErr)}`);
   }
-
-  return parseBase64AudioInput(audioBase64);
 }
 
-async function callAsrOpenAICompat(params: {
-  apiKey: string;
-  baseUrl: string;
-  model: string;
-  audio: { bytes: Uint8Array; mimeType: string; filename: string };
-  language?: string;
-  prompt?: string;
-  timeoutMs?: number;
-}): Promise<{ text: string; raw: unknown }> {
-  const url = `${params.baseUrl.replace(/\/$/, "")}/audio/transcriptions`;
-  const form = new FormData();
-  form.append("model", params.model);
-  if (params.language) {
-    form.append("language", params.language);
-  }
-  if (params.prompt) {
-    form.append("prompt", params.prompt);
-  }
-  form.append(
-    "file",
-    new Blob([params.audio.bytes], { type: params.audio.mimeType || "application/octet-stream" }),
-    params.audio.filename,
-  );
-
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${params.apiKey}`,
-    },
-    body: form,
-    signal: AbortSignal.timeout(params.timeoutMs || 45000),
-  });
-
-  const textBody = await res.text();
-  if (!res.ok) {
-    throw new Error(`ASR HTTP ${res.status}: ${textBody.slice(0, 300)}`);
-  }
-
-  let raw: unknown = textBody;
-  try {
-    raw = JSON.parse(textBody);
-  } catch {
-    raw = textBody;
-  }
-
-  if (raw && typeof raw === "object") {
-    const obj = raw as Record<string, unknown>;
-    const text =
-      (typeof obj.text === "string" && obj.text) ||
-      (typeof obj.output_text === "string" && obj.output_text) ||
-      (typeof obj.transcript === "string" && obj.transcript) ||
-      "";
-    return { text: text.trim(), raw };
-  }
-
-  return {
-    text: String(raw || "").trim(),
-    raw,
-  };
-}
-
-async function callAsrDashscopeAigc(params: {
-  apiKey: string;
-  baseUrl: string;
-  model: string;
-  audio: { bytes: Uint8Array; mimeType: string; filename: string };
-  prompt?: string;
-  timeoutMs?: number;
-}): Promise<{ text: string; raw: unknown }> {
-  const endpoint = resolveDashscopeAigcEndpoint(params.baseUrl);
-  const mime = params.audio.mimeType || "audio/wav";
-  const audioDataUrl = `data:${mime};base64,${Buffer.from(params.audio.bytes).toString("base64")}`;
-  const content: Array<Record<string, unknown>> = [{ audio: audioDataUrl }];
-  if (params.prompt) {
-    content.push({ text: params.prompt });
-  }
-  const payload: Record<string, unknown> = {
-    model: params.model,
-    input: {
-      messages: [
-        {
-          role: "user",
-          content,
-        },
-      ],
-    },
-    parameters: {
-      asr_options: {
-        sample_rate: 16000,
-        channel: 1,
-      },
-    },
-  };
-
-  const raw = await fetchJson(
-    endpoint,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${params.apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(payload),
-    },
-    params.timeoutMs || 60000,
-  );
-
-  const text =
-    (raw as Record<string, unknown>)?.output &&
-    typeof (raw as Record<string, unknown>).output === "object"
-      ? (() => {
-          const output = (raw as Record<string, unknown>).output as Record<string, unknown>;
-          const choices = output.choices;
-          if (!Array.isArray(choices) || !choices[0] || typeof choices[0] !== "object") {
-            return "";
-          }
-          const message = (choices[0] as Record<string, unknown>).message as Record<string, unknown> | undefined;
-          if (!message) {
-            return "";
-          }
-          const contentList = message.content;
-          if (!Array.isArray(contentList)) {
-            return "";
-          }
-          for (const item of contentList) {
-            if (!item || typeof item !== "object") continue;
-            const t = (item as Record<string, unknown>).text;
-            if (typeof t === "string" && t.trim()) {
-              return t.trim();
-            }
-          }
-          return "";
-        })()
-      : "";
-
-  if (!text) {
-    throw new Error(`ASR response missing text: ${JSON.stringify(raw).slice(0, 280)}`);
-  }
-  return { text, raw };
-}
-
-async function callTtsOpenAICompat(params: {
-  apiKey: string;
-  baseUrl: string;
-  model: string;
-  voice: string;
-  input: string;
-  format: string;
-  instructions?: string;
-  timeoutMs?: number;
-}): Promise<{ audioBytes: Uint8Array; mimeType: string }> {
-  const url = `${params.baseUrl.replace(/\/$/, "")}/audio/speech`;
-  const payload: Record<string, unknown> = {
-    model: params.model,
-    input: params.input,
-    voice: params.voice,
-    format: params.format,
-    response_format: params.format,
-  };
-  if (params.instructions) {
-    payload.instructions = params.instructions;
-  }
-
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${params.apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(params.timeoutMs || 45000),
-  });
-
-  const contentType = res.headers.get("content-type") || "application/octet-stream";
-  if (!res.ok) {
-    const errText = await res.text().catch(() => "");
-    throw new Error(`TTS HTTP ${res.status}: ${errText.slice(0, 300)}`);
-  }
-
-  if (contentType.includes("application/json")) {
-    const text = await res.text();
-    const parsed = JSON.parse(text) as Record<string, unknown>;
-    const b64 =
-      (typeof parsed.audio === "string" && parsed.audio) ||
-      (typeof parsed.audio_base64 === "string" && parsed.audio_base64) ||
-      "";
-    if (!b64) {
-      throw new Error("TTS JSON response does not contain audio base64 field");
-    }
-    const bytes = Buffer.from(b64, "base64");
-    return {
-      audioBytes: new Uint8Array(bytes),
-      mimeType: params.format === "wav" ? "audio/wav" : "audio/mpeg",
-    };
-  }
-
-  const ab = await res.arrayBuffer();
-  return {
-    audioBytes: new Uint8Array(ab),
-    mimeType: contentType,
-  };
-}
-
-async function callTtsDashscopeAigc(params: {
-  apiKey: string;
-  baseUrl: string;
-  model: string;
-  voice: string;
-  input: string;
-  format: string;
-  rate?: number;
-  pitch?: number;
-  volume?: number;
-  timeoutMs?: number;
-}): Promise<{ audioBytes: Uint8Array; mimeType: string; raw: unknown }> {
-  const endpoint = resolveDashscopeAigcEndpoint(params.baseUrl);
-  const payload = {
-    model: params.model,
-    input: { text: params.input },
-    parameters: {
-      voice: params.voice,
-      format: params.format,
-      rate: params.rate,
-      pitch: params.pitch,
-      volume: params.volume,
-    },
-  };
-
-  const raw = (await fetchJson(
-    endpoint,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${params.apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(payload),
-    },
-    params.timeoutMs || 60000,
-  )) as Record<string, unknown>;
-
-  const output = (raw.output || {}) as Record<string, unknown>;
-  const audio = (output.audio || {}) as Record<string, unknown>;
-  const b64 = typeof audio.data === "string" ? audio.data.trim() : "";
-  if (b64) {
-    return {
-      audioBytes: new Uint8Array(Buffer.from(b64, "base64")),
-      mimeType: params.format === "wav" ? "audio/wav" : params.format === "ogg" ? "audio/ogg" : "audio/mpeg",
-      raw,
-    };
-  }
-
-  const url = typeof audio.url === "string" ? audio.url.trim() : "";
-  if (url) {
-    const downloaded = await fetchBytes(url, undefined, 30000);
-    return {
-      audioBytes: downloaded.bytes,
-      mimeType: downloaded.contentType || "application/octet-stream",
-      raw,
-    };
-  }
-
-  throw new Error(`TTS response missing audio data/url: ${JSON.stringify(raw).slice(0, 280)}`);
-}
-
-async function writeTempAudioFile(bytes: Uint8Array, ext: string): Promise<string> {
-  const dir = path.join(tmpdir(), "openclaw-xiao-services");
-  await fs.mkdir(dir, { recursive: true });
-  const filePath = path.join(dir, `tts-${Date.now()}-${randomUUID()}.${ext}`);
-  await fs.writeFile(filePath, Buffer.from(bytes));
-  return filePath;
-}
-
+type ProbeStatus = "ok" | "fail" | "skip";
 async function runServiceProbe(): Promise<{
   summary: { ok: number; fail: number; skip: number };
   checks: Array<{ name: string; status: ProbeStatus; detail: string }>;
@@ -1575,12 +511,15 @@ const emptySchema = {
   properties: {},
 } as const;
 
+// 定义并导出了 xiao-services 核心插件对象
+// 它集成封装了所有外部检索及 AI 衍生能力，主要通过 Tool 的形式向外提供接口
 const xiaoServicesPlugin = {
   id: "xiao-services",
   name: "Xiao Services",
   description: "Migrated service tools for search/weather/stock/vision/voice",
   configSchema: emptyPluginConfigSchema(),
   register(api: OpenClawPluginApi) {
+    // 注册谷歌搜索工具
     api.registerTool({
       name: "xiao_search_google",
       label: "Xiao Google Search",
@@ -1674,16 +613,7 @@ const xiaoServicesPlugin = {
         }
 
         try {
-          const html = await fetchTextByCurl({
-            url,
-            timeoutSec: 25,
-            compressed: true,
-            headers: {
-              "User-Agent":
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-              Accept: "text/html,application/xhtml+xml",
-            },
-          });
+          const html = await fetchUrlDigestHtml(url, 25);
 
           const title = cleanText((html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || "").trim(), 220);
           const description = pickMetaDescription(html);
@@ -1940,11 +870,11 @@ const xiaoServicesPlugin = {
         const timeoutMs = envTimeoutMs("XIAO_VISION_TIMEOUT_MS", 35000);
         let resolvedImage:
           | {
-              imageRef: string;
-              source: "data_url" | "downloaded_url";
-              mimeType: string;
-              bytes: number;
-            }
+            imageRef: string;
+            source: "data_url" | "downloaded_url";
+            mimeType: string;
+            bytes: number;
+          }
           | null = null;
 
         try {
@@ -1966,22 +896,22 @@ const xiaoServicesPlugin = {
           });
         }
 
-        const body = {
-          model,
-          messages: [
-            {
-              role: "user",
-              content: [
-                { type: "text", text: prompt },
-                { type: "image_url", image_url: { url: resolvedImage.imageRef } },
-              ],
-            },
-          ],
-          max_tokens: 300,
-          temperature: 0.4,
-        };
-
         try {
+          const body = {
+            model,
+            messages: [
+              {
+                role: "user",
+                content: [
+                  { type: "text", text: prompt },
+                  { type: "image_url", image_url: { url: resolvedImage.imageRef } },
+                ],
+              },
+            ],
+            max_tokens: 300,
+            temperature: 0.4,
+          };
+
           const data = (await fetchJson(
             `${baseUrl}/chat/completions`,
             {
@@ -2005,6 +935,7 @@ const xiaoServicesPlugin = {
               timeoutMs,
             });
           }
+
           return await obsWrap("xiao_vision_analyze", obsUser, obsStart, {
             ok: true,
             provider: "dashscope_compatible",
@@ -2067,13 +998,13 @@ const xiaoServicesPlugin = {
             audioBase64: params.audioBase64,
             audioPath: params.audioPath,
           });
-          const maxBytes = mediaMaxBytes();
-          if (audio.bytes.byteLength > maxBytes) {
+          const maxReqBytes = 1024 * 1024 * 20; // 20 MB just as a limit for audio bytes
+          if (audio.bytes.byteLength > maxReqBytes) {
             return await obsWrap("xiao_asr_transcribe", obsUser, obsStart, {
               ok: false,
               error: "media_too_large",
               bytes: audio.bytes.byteLength,
-              maxBytes,
+              maxBytes: maxReqBytes,
             });
           }
 
@@ -2406,7 +1337,6 @@ const xiaoServicesPlugin = {
         lines.push("- xiao_schedule_reminder");
         lines.push("- xiao_service_probe");
         lines.push("");
-        lines.push(`env file: ${resolveEnvFilePath()}`);
         lines.push(`obs file: ${resolveObsFilePath()}`);
         lines.push("");
         lines.push("env status:");

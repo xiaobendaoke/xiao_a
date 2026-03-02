@@ -509,15 +509,19 @@ const xiaoEmotionPlugin = {
   description: "Mood and profile hooks with tag-based persistence",
   configSchema: emptyPluginConfigSchema(),
   register(api: OpenClawPluginApi) {
+    // 解析插件级别的静默防扰配置（如夜间免打扰时间段）
     const quietHours = resolveQuietHours(api.pluginConfig);
 
+    // 挂载 Agent 启动前置钩子：在 LLM 生成回复前，注入情绪、记忆与画像上下文
     api.on("before_agent_start", async (event, ctx) => {
+      // 通过上下文反解析真实用户标识，并应用当前别名映射获取统一身份
       const resolvedKey = resolveUserKeyFromPrompt(event.prompt || "", ctx.sessionKey);
       const userKey = applyUserAlias(resolvedKey);
       if (ctx.sessionKey) {
         SESSION_TO_USER_KEY.set(ctx.sessionKey, userKey);
       }
 
+      // 获取当前用户的情绪分值、画像与旧版遗留数据进行组合
       const mood = await getMoodValue(userKey);
       const store = await ensureStoreLoaded();
       const profile = store.profiles[userKey];
@@ -526,8 +530,11 @@ const xiaoEmotionPlugin = {
         ...(legacy?.profile || {}),
         ...(profile || {}),
       };
+
+      // 判断是否处于安静免打扰时段
       const quietMode = isWithinQuietHours(quietHours);
 
+      // 构建要插入给 LLM 的 system prompt 上下文内容
       const lines: string[] = [];
       lines.push("XIAO_EMOTION_CONTEXT");
       lines.push(`user_key=${userKey}`);
@@ -546,15 +553,20 @@ const xiaoEmotionPlugin = {
           lines.push(line);
         }
       }
+
+      // 注入严格的基调设定和标签交互协议
       lines.push("请维持小a语气：自然、口语化、避免客服腔。");
       lines.push("需要更新状态时，在末尾追加标签：");
       lines.push("[MOOD_CHANGE:x] 其中 x 范围 -3..3");
       lines.push("[UPDATE_PROFILE:key=value]");
 
+      // 根据当前情绪强制修改基调
       const forced = moodInstruction(mood);
       if (forced) {
         lines.push(forced);
       }
+
+      // 安静时段下追加更短更轻的回复要求
       if (quietMode) {
         lines.push("当前在安静时段：回复更短、更轻声。");
       }
@@ -564,25 +576,33 @@ const xiaoEmotionPlugin = {
       };
     });
 
+    // 挂载消息发送钩子：拦截并解析 LLM 返回数据中可能潜藏的状态变更标签
     api.on("message_sending", async (event, ctx) => {
       const content = typeof event.content === "string" ? event.content : "";
       if (!content) {
         return;
       }
 
+      // 回溯当前所属的用户映射
       const keyFromSession = SESSION_TO_USER_KEY.get((ctx as { sessionKey?: string }).sessionKey || "");
       const userKey =
         keyFromSession ||
         applyUserAlias(resolveUserKeyFromOutbound({ channelId: ctx.channelId, conversationId: ctx.conversationId }, event.to));
 
+      // 提取回复正文内容，并将标签（如果存在）执行处理后剥离出原始回复文本
       const parsed = parseTagsAndClean(content);
+
+      // 如果发生情绪更新，同步调整状态
       if (parsed.moodChange !== null) {
         await adjustMood(userKey, clamp(parsed.moodChange, -3, 3));
       }
+
+      // 如果发生用户画像资料更新，同步更新信息块
       if (parsed.profileUpdates.length > 0) {
         await applyProfileUpdates(userKey, parsed.profileUpdates);
       }
 
+      // 若有截取掉标签，则需要向渠道返还清洗干净的正文，避免泄漏调试标记
       if (parsed.cleanText !== content) {
         return {
           content: parsed.cleanText || "...",
@@ -591,6 +611,7 @@ const xiaoEmotionPlugin = {
       return;
     });
 
+    // 注册 /mood 命令，用于管理与查看情绪/画像状态
     api.registerCommand({
       name: "mood",
       description: "Show or adjust mood state. Usage: /mood [status|set N|add N|profile]",
@@ -603,6 +624,7 @@ const xiaoEmotionPlugin = {
         const userKey = applyUserAlias(`${ctx.channel}:${actor}`);
         const args = (ctx.args || "").trim();
 
+        // 缺省参数或传递 status，展示当前情绪看板
         if (!args || args === "status") {
           const mood = await getMoodValue(userKey);
           return {
@@ -610,17 +632,19 @@ const xiaoEmotionPlugin = {
           };
         }
 
+        // 调用 profile 以查阅固化的资料片段
         if (args === "profile") {
           const store = await ensureStoreLoaded();
           const profile = store.profiles[userKey] || {};
           const text = Object.keys(profile).length
             ? Object.entries(profile)
-                .map(([k, v]) => `${k}=${v}`)
-                .join("\n")
+              .map(([k, v]) => `${k}=${v}`)
+              .join("\n")
             : "profile is empty";
           return { text };
         }
 
+        // 强行设值操作（如 set -10）
         const setMatch = args.match(/^set\s+(-?\d+)$/i);
         if (setMatch?.[1]) {
           const store = await ensureStoreLoaded();
@@ -633,6 +657,7 @@ const xiaoEmotionPlugin = {
           return { text: `mood set to ${next}` };
         }
 
+        // 差值变更（如 add 5）
         const addMatch = args.match(/^add\s+(-?\d+)$/i);
         if (addMatch?.[1]) {
           const delta = clamp(Number.parseInt(addMatch[1], 10), -10, 10);

@@ -64,6 +64,30 @@ check_cmd_optional() {
   fi
 }
 
+wait_for_run_entry() {
+  local jid="$1"
+  local out_file="$2"
+  local wait_sec="${XIAO_FFC_WAIT_SEC:-120}"
+  local waited=0
+  local status=""
+  local summary=""
+  while [[ "$waited" -le "$wait_sec" ]]; do
+    if openclaw cron runs --id "$jid" --limit 1 | json_payload >"$out_file" 2>/tmp/xiao_ffc_runs.err; then
+      status="$(jq -r '.entries[0].status // ""' "$out_file" 2>/dev/null || true)"
+      summary="$(jq -r '.entries[0].summary // ""' "$out_file" 2>/dev/null || true)"
+      if [[ -n "$summary" ]]; then
+        return 0
+      fi
+      if [[ "$status" == "ok" || "$status" == "error" || "$status" == "failed" ]]; then
+        return 0
+      fi
+    fi
+    sleep 3
+    waited=$((waited + 3))
+  done
+  return 1
+}
+
 run_case() {
   local name="$1"
   local message="$2"
@@ -80,7 +104,11 @@ run_case() {
     --json | json_payload | jq -r '.id')"
 
   openclaw cron run "$jid" --expect-final >/tmp/xiao_ffc_run.log 2>&1 || true
-  openclaw cron runs --id "$jid" --limit 1 | json_payload > /tmp/xiao_ffc_runs.json || true
+  if ! wait_for_run_entry "$jid" /tmp/xiao_ffc_runs.json; then
+    record_fail "$name" "run timeout waiting final entry"
+    openclaw cron rm "$jid" >/dev/null 2>&1 || true
+    return 0
+  fi
   openclaw cron rm "$jid" >/dev/null 2>&1 || true
 
   local summary
@@ -114,7 +142,11 @@ run_case_optional() {
     --json | json_payload | jq -r '.id')"
 
   openclaw cron run "$jid" --expect-final >/tmp/xiao_ffc_run.log 2>&1 || true
-  openclaw cron runs --id "$jid" --limit 1 | json_payload > /tmp/xiao_ffc_runs.json || true
+  if ! wait_for_run_entry "$jid" /tmp/xiao_ffc_runs.json; then
+    record_warn "$name" "run timeout waiting final entry (qq context likely required)"
+    openclaw cron rm "$jid" >/dev/null 2>&1 || true
+    return 0
+  fi
   openclaw cron rm "$jid" >/dev/null 2>&1 || true
 
   local summary

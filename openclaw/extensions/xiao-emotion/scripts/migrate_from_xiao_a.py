@@ -49,6 +49,7 @@ def load_json(path: Path) -> dict:
 
 
 def main() -> int:
+    # 设置并解析命令行参数：需要指定原数据库与输出JSON路径，以及可选的 userKey 前缀
     parser = argparse.ArgumentParser()
     parser.add_argument("--db", required=True, help="Path to xiao_a sqlite db")
     parser.add_argument("--out", required=True, help="Path to xiao-emotion state.json")
@@ -60,6 +61,7 @@ def main() -> int:
     out_path = Path(args.out)
     prefix = (args.prefix or "").strip()
 
+    # 如果输入的源 SQLite 数据库不存在则直接报错退出
     if not db_path.exists():
         raise SystemExit(f"db not found: {db_path}")
 
