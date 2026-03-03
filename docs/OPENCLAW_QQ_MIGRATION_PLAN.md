@@ -11,7 +11,7 @@
 | 阶段2 核心聊天主流程迁移 | 进行中 | `xiao-core` 已承接普通聊天/显式记忆/轻量RAG/天气股票 + GitHub周榜 + 链接总结意图引导（`xiao_url_digest`）+ 来源追问链接回传（`/xiao-links`）+ QQ提醒/反思命令 | 迁移更多 companion_core 逻辑并做回归对齐 |
 | 阶段3 定时任务迁移 | 进行中 | OpenClaw cron 已从 4 项扩展到 6 项（新增 info-digest / reflection），并支持 `schedules`->cron 导入脚本 | 观察连续 3 天无漏发/重发并收敛推送策略 |
 | 阶段4 语音与图片对齐 | 基本完成（持续观察） | 已补图片提示词/回退文案对齐、媒体限制与超时边界；新增成功率验收脚本并达标 | 连续观察 7 天，确认无回归后再改为“已完成” |
-| 阶段5 下线 NoneBot/NapCat | 已完成（代码归档） | `bot/`、`napcat/`、`docker-compose*.yml` 已迁入 `legacy/`，主路径仅保留 OpenClaw | 持续观察稳定性；如需回滚可从 `legacy/` 恢复 |
+| 阶段5 下线 旧主控栈 | 已完成（代码归档） | `bot/`、`napcat/`、`docker-compose*.yml` 已迁入 `legacy/`，主路径仅保留 OpenClaw | 持续观察稳定性；如需回滚可从 `legacy/` 恢复 |
 
 ### 0.1 已完成项证据（可复核）
 
@@ -31,27 +31,27 @@
 
 ## 1. 目标与边界
 
-目标：将当前 `NoneBot + NapCat + OpenClaw侧车` 架构，迁移为 `OpenClaw(腾讯云) + QQ通道` 主控架构。
+目标：将当前 `LegacyBot + NapCat + OpenClaw侧车` 架构，迁移为 `OpenClaw(腾讯云) + QQ通道` 主控架构。
 
 边界：
 
 - 保留你现在的小a人设、记忆、情绪、工具能力。
-- 逐步下线 `NoneBot` 与 `NapCat`，最终仅保留 OpenClaw 侧运行。
+- 逐步下线 `LegacyBot` 与 `NapCat`，最终仅保留 OpenClaw 侧运行。
 - 先保证“功能可用”，再做“行为一致性”细抠（语气、气泡节奏、主动互动策略）。
 
 ## 2. 现状（代码事实）
 
-历史主链路依赖 NoneBot（现已归档到 `legacy/nonebot/`）：
+历史主链路依赖 LegacyBot（现已归档到 `legacy/legacy-bot/`）：
 
-- 启动入口是 NoneBot：`legacy/nonebot/bot/bot.py`
-- 私聊处理、notice、rule 在：`legacy/nonebot/bot/plugins/companion_core/handlers.py`
-- 定时任务依赖 `nonebot_plugin_apscheduler`：
+- 启动入口是 LegacyBot：`legacy/legacy-bot/bot/bot.py`
+- 私聊处理、notice、rule 在：`legacy/legacy-bot/bot/plugins/companion_core/handlers.py`
+- 定时任务依赖 `legacy_apscheduler_plugin`：
   - `proactive.py`
   - `scheduler_custom.py`
   - `weather_push.py`
   - `github_weekly_push.py`
   - `finance_daily/daily_job.py`
-- OpenClaw 旧桥接代码：`legacy/nonebot/bot/plugins/companion_core/openclaw_bridge.py`
+- OpenClaw 旧桥接代码：`legacy/legacy-bot/bot/plugins/companion_core/openclaw_bridge.py`
 
 你已有的 OpenClaw 基础：
 
@@ -76,7 +76,7 @@ QQ用户
 关键点：
 
 - 入站/出站都走 OpenClaw QQ channel，不再通过 NapCat websocket。
-- `xiao-core` 成为真正的“聊天主控插件”，替代 NoneBot 的 handlers + scheduler。
+- `xiao-core` 成为真正的“聊天主控插件”，替代 LegacyBot 的 handlers + scheduler。
 
 ## 4. 推荐迁移策略
 
@@ -120,7 +120,7 @@ QQ用户
 
 回滚：
 
-- 切回原 NapCat + NoneBot（保留旧 compose 即可）。
+- 切回原 NapCat + LegacyBot（保留旧 compose 即可）。
 
 ## 阶段2：迁移核心聊天主流程（3-5天，状态：进行中）
 
@@ -158,7 +158,7 @@ QQ用户
 
 ## 阶段3：迁移定时任务与推送（2-4天，状态：进行中）
 
-目标：移除对 NoneBot apscheduler 的依赖。
+目标：移除对 LegacyBot apscheduler 的依赖。
 
 迁移对象：
 
@@ -212,13 +212,13 @@ QQ用户
 
 - 语音与图片链路成功率 >= 95%。
 
-## 阶段5：下线 NoneBot/NapCat（0.5-1天，状态：已完成-代码归档）
+## 阶段5：下线 旧主控栈（0.5-1天，状态：已完成-代码归档）
 
 前提：阶段1-4连续稳定运行 >= 7 天。
 
 动作：
 
-- 将 `bot/`、`napcat/`、`docker-compose.yml` 迁移到 `legacy/nonebot/`。
+- 将 `bot/`、`napcat/`、`docker-compose.yml` 迁移到 `legacy/legacy-bot/`。
 - 将 `docker-compose.openclaw.yml` 迁移到 `legacy/openclaw-docker/`。
 - README/SETUP 更新为纯 OpenClaw QQ 通道部署说明。
 
@@ -288,4 +288,4 @@ QQ用户
   - RAG 检索
   - 天气/股票工具调用
 
-这样 2-3 天就能看到“去 NoneBot 后是否跑得稳”。
+这样 2-3 天就能看到“去 LegacyBot 后是否跑得稳”。

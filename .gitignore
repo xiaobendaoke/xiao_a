@@ -33,7 +33,7 @@ openclaw/extensions/**/dist/
 openclaw/extensions/**/.cache/
 
 # ------------------------------------------------------------
-# Legacy runtime dumps (NoneBot / NapCat)
+# Legacy runtime dumps (LegacyBot / NapCat)
 # Keep local for rollback only; do not publish in clean OpenClaw repo
 # ------------------------------------------------------------
 legacy/

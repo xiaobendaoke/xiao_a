@@ -1,6 +1,6 @@
 # GitHub 发布指引（OpenClaw-only）
 
-目标：只发布当前 OpenClaw 主路径，不包含 NoneBot/NapCat 历史和运行时数据。
+目标：只发布当前 OpenClaw 主路径，不包含 旧主控栈 历史和运行时数据。
 
 ## 1. 发布前检查
 
@@ -85,6 +85,6 @@ git commit -m "chore: initial OpenClaw-only publish"
 ## 5. PR 描述建议
 
 - 本次发布为 OpenClaw-only 主路径
-- 已移除 NoneBot/NapCat 历史运行内容
+- 已移除 旧主控栈 历史运行内容
 - 文档入口统一在 `docs/`
 - 已包含一键验收与 cron 审计脚本

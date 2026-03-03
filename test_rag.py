@@ -1,22 +1,51 @@
-"""RAG 功能验证脚本
-可在 NoneBot 运行环境内执行，或在本地安装依赖后直接执行。
-运行方式：
-  docker compose exec nonebot python test_rag.py
-  python test_rag.py
+#!/usr/bin/env python3
+"""
+RAG 功能验证脚本
 
-前置条件：
-  必须配置了 SILICONFLOW_API_KEY (或 EMBEDDING_MODEL 对应平台的 Key)
+描述
+    测试小a的RAG（检索增强生成）记忆功能是否正常工作。
+    验证 ChromaDB 初始化、文档写入和语义检索功能。
+
+使用方法
+    # 在 Docker 环境中运行
+    docker compose exec legacybot python test_rag.py
+    
+    # 本地直接运行（需安装依赖）
+    python test_rag.py
+
+前置条件
+    - 必须配置 SILICONFLOW_API_KEY 环境变量
+    - 或配置 EMBEDDING_MODEL 对应平台的 API Key
+    - 需要安装 chromadb>=0.4.0
+
+返回码
+    0   测试通过
+    1   初始化失败或API错误
+
+示例
+    # 测试RAG功能
+    python test_rag.py
+    
+    # 预期输出示例
+    === 开始 RAG 功能测试 ===
+    [1] 初始化 ChromaDB...
+    ✅ 初始化成功，当前文档数: 0
+    [2] 尝试写入记忆: 小a最喜欢的饮料是草莓味的波子汽水。
+    ✅ 写入成功
+    [3] 尝试检索: 小a喜欢喝什么？
+    ✅ 测试通过！成功找回记忆。
 """
 import sys
 import os
 import asyncio
+import logging
 
 # 添加项目根目录到 path，以便 import bot
 sys.path.insert(0, os.getcwd())
 
-# 简单 mock logger 避免报错
-from nonebot import logger
-logger.add(sys.stderr, level="INFO")
+# 简单 logger，避免依赖特定机器人框架
+logger = logging.getLogger("test_rag")
+logging.basicConfig(stream=sys.stderr, level=logging.INFO)
 
 # 尝试导入 rag_core
 try:

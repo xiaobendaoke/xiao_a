@@ -36,7 +36,7 @@
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                           框架层 (Framework Layer)                           │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│  NoneBot2 (FastAPI)                                                         │
+│  LegacyBot2 (FastAPI)                                                         │
 │  ├── 核心：插件生命周期管理、消息路由、定时任务调度(apscheduler)                 │
 │  ├── 适配器：OneBot V11 Adapter                                              │
 │  └── 钩子：on_message, on_notice, scheduled_job                             │
@@ -1736,12 +1736,12 @@ services:
       - NAPCAT_UID=1000
       - NAPCAT_GID=1000
 
-  # NoneBot2: 机器人核心
-  nonebot:
+  # LegacyBot2: 机器人核心
+  legacybot:
     build:
       context: ./bot
       dockerfile: Dockerfile
-    container_name: nonebot
+    container_name: legacybot
     restart: unless-stopped
     ports:
       - "8080:8080"  # OneBot WebSocket
