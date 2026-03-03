@@ -18,6 +18,10 @@ import { callAsrOpenAICompat, callTtsOpenAICompat } from "./features/openai.js";
 import { callAsrDashscopeAigc, callTtsDashscopeAigc } from "./features/dashscope.js";
 import { resolveVisionImageInput, resolveAudioInput, extFromMime } from "./features/media.js";
 import { obsWrap, jsonResult, resolveObsUserKey, resolveObsFilePath } from "./features/obs.js";
+import { resolveMusic } from "./features/music.js";
+import { recommendMovies } from "./features/movie.js";
+import { searchRestaurants } from "./features/restaurant.js";
+import { trackExpress } from "./features/express.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -505,6 +509,45 @@ const reminderSchema = {
   },
 } as const;
 
+const musicSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["url"],
+  properties: {
+    url: { type: "string", description: "Music share url" },
+  },
+} as const;
+
+const movieSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    query: { type: "string", description: "Movie keyword" },
+    limit: { type: "integer", minimum: 1, maximum: 10 },
+  },
+} as const;
+
+const restaurantSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["city"],
+  properties: {
+    city: { type: "string", description: "City name" },
+    keyword: { type: "string", description: "Food keyword" },
+    limit: { type: "integer", minimum: 1, maximum: 10 },
+  },
+} as const;
+
+const expressSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["company", "number"],
+  properties: {
+    company: { type: "string", description: "Courier company" },
+    number: { type: "string", description: "Tracking number" },
+  },
+} as const;
+
 const emptySchema = {
   type: "object",
   additionalProperties: false,
@@ -587,6 +630,90 @@ const xiaoServicesPlugin = {
           });
         } catch (err) {
           return jsonResult({ ok: false, error: errToString(err) });
+        }
+      },
+    } as AnyAgentTool);
+
+    api.registerTool({
+      name: "xiao_music_resolve",
+      label: "Xiao Music Resolve",
+      description: "Resolve music share info from url",
+      parameters: musicSchema,
+      async execute(_toolCallId: string, params: { url?: string }) {
+        const obsStart = Date.now();
+        const obsUser = resolveObsUserKey(params);
+        try {
+          const result = await resolveMusic((params.url || "").trim());
+          return await obsWrap("xiao_music_resolve", obsUser, obsStart, result);
+        } catch (err) {
+          return await obsWrap("xiao_music_resolve", obsUser, obsStart, {
+            ok: false,
+            error: errToString(err),
+          });
+        }
+      },
+    } as AnyAgentTool);
+
+    api.registerTool({
+      name: "xiao_movie_recommend",
+      label: "Xiao Movie Recommend",
+      description: "Recommend movies by keyword",
+      parameters: movieSchema,
+      async execute(_toolCallId: string, params: { query?: string; limit?: number }) {
+        const obsStart = Date.now();
+        const obsUser = resolveObsUserKey(params);
+        try {
+          const result = await recommendMovies((params.query || "").trim(), clamp(Number(params.limit || 5), 1, 10));
+          return await obsWrap("xiao_movie_recommend", obsUser, obsStart, result);
+        } catch (err) {
+          return await obsWrap("xiao_movie_recommend", obsUser, obsStart, {
+            ok: false,
+            error: errToString(err),
+          });
+        }
+      },
+    } as AnyAgentTool);
+
+    api.registerTool({
+      name: "xiao_restaurant_search",
+      label: "Xiao Restaurant Search",
+      description: "Search restaurants by city/keyword",
+      parameters: restaurantSchema,
+      async execute(_toolCallId: string, params: { city?: string; keyword?: string; limit?: number }) {
+        const obsStart = Date.now();
+        const obsUser = resolveObsUserKey(params);
+        try {
+          const result = await searchRestaurants(
+            (params.city || "").trim(),
+            (params.keyword || "").trim(),
+            clamp(Number(params.limit || 5), 1, 10),
+          );
+          return await obsWrap("xiao_restaurant_search", obsUser, obsStart, result);
+        } catch (err) {
+          return await obsWrap("xiao_restaurant_search", obsUser, obsStart, {
+            ok: false,
+            error: errToString(err),
+          });
+        }
+      },
+    } as AnyAgentTool);
+
+    api.registerTool({
+      name: "xiao_express_track",
+      label: "Xiao Express Track",
+      description: "Track express order",
+      parameters: expressSchema,
+      async execute(_toolCallId: string, params: { company?: string; number?: string }) {
+        const obsStart = Date.now();
+        const obsUser = resolveObsUserKey(params);
+        try {
+          const result = await trackExpress((params.company || "").trim(), (params.number || "").trim());
+          return await obsWrap("xiao_express_track", obsUser, obsStart, result);
+        } catch (err) {
+          return await obsWrap("xiao_express_track", obsUser, obsStart, {
+            ok: false,
+            error: errToString(err),
+          });
         }
       },
     } as AnyAgentTool);
@@ -1336,6 +1463,10 @@ const xiaoServicesPlugin = {
         lines.push("- xiao_tts_synthesize");
         lines.push("- xiao_schedule_reminder");
         lines.push("- xiao_service_probe");
+        lines.push("- xiao_music_resolve");
+        lines.push("- xiao_movie_recommend");
+        lines.push("- xiao_restaurant_search");
+        lines.push("- xiao_express_track");
         lines.push("");
         lines.push(`obs file: ${resolveObsFilePath()}`);
         lines.push("");
@@ -1355,6 +1486,10 @@ const xiaoServicesPlugin = {
         lines.push(`- XIAO_VISION_DEFAULT_PROMPT: ${env("XIAO_VISION_DEFAULT_PROMPT") ? "set" : "using built-in"}`);
         lines.push(`- XIAO_ASR_TIMEOUT_MS: ${env("XIAO_ASR_TIMEOUT_MS") || "(default: 45000)"}`);
         lines.push(`- XIAO_TTS_TIMEOUT_MS: ${env("XIAO_TTS_TIMEOUT_MS") || "(default: 45000)"}`);
+        lines.push(`- TMDB_API_KEY: ${env("TMDB_API_KEY") ? "set" : "missing"}`);
+        lines.push(`- AMAP_KEY: ${env("AMAP_KEY") ? "set" : "missing"}`);
+        lines.push(`- KDNIAO_KEY: ${env("KDNIAO_KEY") ? "set" : "missing"}`);
+        lines.push(`- KDNIAO_CUSTOMER: ${env("KDNIAO_CUSTOMER") ? "set" : "missing"}`);
         return { text: lines.join("\n") };
       },
     });

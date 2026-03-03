@@ -22,6 +22,17 @@
 5. 同一用户连续 5 轮聊天后，`/xiao-memory search` 仍能命中近期上下文。
 6. 切换用户后，A 用户记忆不应泄露给 B 用户。
 
+## 2.1 新增陪伴功能（8条）
+
+1. `/xiao-persona list` 返回可切换角色列表。
+2. `/xiao-persona set bestie` 后，下一轮语气应偏闺蜜风格。
+3. `/xiao-love-score` 返回总分、等级和分项。
+4. `/xiao-plan add 周末一起看电影` 后，`/xiao-plan list` 可见该条目。
+5. `/xiao-habit create 早起` 后，`/xiao-habit checkin 早起` 应打卡成功。
+6. `/xiao-diary add 20 今天状态还不错` 后，`/xiao-diary today` 应可读到当天记录。
+7. `/xiao-game start riddle` 能进入游戏状态，`/xiao-game answer 人`可答题。
+8. `/xiao-greet 晚安` 应返回晚安类回复。
+
 ## 3. 工具链（天气/股票/GitHub/链接）（10条）
 
 1. 发送“上海今天天气”，回复应包含真实天气要素且不编造。
@@ -34,6 +45,13 @@
 8. 在第 7 条后追加“把刚刚来源链接发我”，应返回至少 1 条真实 URL（优先 recent links）。
 9. QQ 私聊发送 `/xiao-links 5`，应返回最近链接证据列表或明确 `no recent links`。
 10. 执行 `./scripts/openclaw_source_followup_check.sh --user phase2-source-check --url https://example.com`，应返回 `[PASS] source follow-up returned url`。
+
+## 3.1 新增生活工具（4条）
+
+1. 调用 `xiao_music_resolve` 解析音乐链接，返回平台和歌曲信息或明确失败原因。
+2. 调用 `xiao_movie_recommend`，在缺少 `TMDB_API_KEY` 时返回 `missing_env`，有 key 时返回列表。
+3. 调用 `xiao_restaurant_search`，在缺少 `AMAP_KEY` 时返回 `missing_env`，有 key 时返回列表。
+4. 调用 `xiao_express_track`，在缺少快递配置时返回 `missing_env`，有 key 时返回轨迹数据。
 
 ## 4. 提醒与定时任务（8条）
 

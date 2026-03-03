@@ -12,6 +12,15 @@ import {
   hasUrlSummaryIntent,
   hasSourceFollowupIntent,
   parseReminderIntent,
+  detectGreetingType,
+  extractPlanIntent,
+  hasHabitIntent,
+  hasDiaryIntent,
+  hasGameIntent,
+  hasMusicIntent,
+  hasMovieIntent,
+  hasRestaurantIntent,
+  hasExpressIntent,
 } from "./utils/intent.js";
 import {
   extractUrls,
@@ -40,6 +49,7 @@ import {
   getRecentLinks,
   retrieveRagHits,
   runDailyReflection,
+  getUserPersona,
 } from "./state/store.js";
 import {
   extractUserInput,
@@ -63,6 +73,13 @@ import { registerXiaoMemoryCommand } from "./features/memory-command.js";
 import { registerXiaoLinksCommand } from "./features/links-command.js";
 import { registerXiaoReflectCommand } from "./features/reflect-command.js";
 import { registerXiaoRemindCommand, reminderTargetFromUserKey } from "./features/remind-command.js";
+import { registerXiaoGreetingCommand } from "./features/greeting-command.js";
+import { registerXiaoPersonaCommand } from "./features/persona-command.js";
+import { registerXiaoLoveScoreCommand } from "./features/love-score-command.js";
+import { registerXiaoPlanCommand } from "./features/plan-command.js";
+import { registerXiaoHabitCommand } from "./features/habit-command.js";
+import { registerXiaoDiaryCommand } from "./features/diary-command.js";
+import { registerXiaoGameCommand } from "./features/game-command.js";
 
 function emptyPluginConfigSchema() {
   return {
@@ -155,6 +172,15 @@ const xiaoCorePlugin = {
       const ragHits = effectiveUserInput ? await retrieveRagHits(mapped.resolved, effectiveUserInput, maxRagHits) : [];
       const explicitMemo = extractExplicitMemory(effectiveUserInput);
       const reminderIntent = parseReminderIntent(effectiveUserInput);
+      const greetingType = detectGreetingType(effectiveUserInput);
+      const planIntent = extractPlanIntent(effectiveUserInput);
+      const habitIntent = hasHabitIntent(effectiveUserInput);
+      const diaryIntent = hasDiaryIntent(effectiveUserInput);
+      const gameIntent = hasGameIntent(effectiveUserInput);
+      const musicIntent = hasMusicIntent(effectiveUserInput);
+      const movieIntent = hasMovieIntent(effectiveUserInput);
+      const restaurantIntent = hasRestaurantIntent(effectiveUserInput);
+      const expressIntent = hasExpressIntent(effectiveUserInput);
       const weatherIntent = hasWeatherIntent(effectiveUserInput);
       const stockIntent = hasStockIntent(effectiveUserInput);
       const githubIntent = hasGithubTrendingIntent(effectiveUserInput);
@@ -198,11 +224,22 @@ const xiaoCorePlugin = {
       } else if (pendingImage && effectiveUserInput) {
         clearPendingImage(mapped.resolved);
       }
+      const personaKey = await getUserPersona(mapped.resolved);
 
       const lines: string[] = [];
       lines.push("XIAO_CORE_CONTEXT");
       lines.push("runtime=openclaw_primary");
       lines.push(`user_key=${mapped.resolved}`);
+      lines.push(`persona_key=${personaKey}`);
+      if (personaKey === "big_sister") {
+        lines.push("当前角色：知性大姐姐。语气温柔成熟，减少撒娇。");
+      } else if (personaKey === "bestie") {
+        lines.push("当前角色：闺蜜。语气更直率，允许轻度吐槽但不攻击用户。");
+      } else if (personaKey === "little_sister") {
+        lines.push("当前角色：可爱妹妹。语气活泼简短，适度撒娇。");
+      } else {
+        lines.push("当前角色：默认小a亲密陪伴模式。");
+      }
       if (mapped.aliasFrom) {
         lines.push(`user_key_alias_from=${mapped.aliasFrom}`);
       }
@@ -340,6 +377,33 @@ const xiaoCorePlugin = {
         } else {
           lines.push("识别到提醒意图，但未解析到 QQ 用户目标。请先确认提醒对象后再调用 xiao_schedule_reminder。");
         }
+      }
+      if (greetingType) {
+        lines.push(`识别到问候类型=${greetingType}，请使用轻松自然短回复。`);
+      }
+      if (planIntent) {
+        lines.push(`识别到计划内容：${shorten(planIntent.content, 120)}。可引导用户使用 /xiao-plan add 结构化记录。`);
+      }
+      if (habitIntent) {
+        lines.push("识别到打卡/习惯意图。可引导使用 /xiao-habit create|checkin|stats。");
+      }
+      if (diaryIntent) {
+        lines.push("识别到心情日记意图。可引导使用 /xiao-diary add/today/weekly。");
+      }
+      if (gameIntent) {
+        lines.push("识别到互动游戏意图。可引导使用 /xiao-game start riddle|love|truth。");
+      }
+      if (musicIntent) {
+        lines.push("识别到音乐分享意图。优先调用 xiao_music_resolve 获取歌曲信息。");
+      }
+      if (movieIntent) {
+        lines.push("识别到电影推荐意图。优先调用 xiao_movie_recommend。");
+      }
+      if (restaurantIntent) {
+        lines.push("识别到餐厅推荐意图。优先调用 xiao_restaurant_search，缺城市先追问。");
+      }
+      if (expressIntent) {
+        lines.push("识别到快递查询意图。优先调用 xiao_express_track，需要快递公司与单号。");
       }
 
       lines.push(
@@ -514,6 +578,13 @@ const xiaoCorePlugin = {
     registerXiaoLinksCommand(api);
     registerXiaoReflectCommand(api);
     registerXiaoRemindCommand(api);
+    registerXiaoGreetingCommand(api);
+    registerXiaoPersonaCommand(api);
+    registerXiaoLoveScoreCommand(api);
+    registerXiaoPlanCommand(api);
+    registerXiaoHabitCommand(api);
+    registerXiaoDiaryCommand(api);
+    registerXiaoGameCommand(api);
   },
 };
 

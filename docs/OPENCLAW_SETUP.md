@@ -57,6 +57,13 @@ curl -sS http://127.0.0.1:18789/v1/chat/completions \
 - `/xiao-links 5`
 - `/xiao-reflect 24`
 - `/xiao-remind 30 记得喝水`
+- `/xiao-persona list`
+- `/xiao-love-score`
+- `/xiao-plan list`
+- `/xiao-habit list`
+- `/xiao-diary today`
+- `/xiao-game start riddle`
+- `/xiao-greet 晚安`
 
 如果都能回，说明通道和插件链路正常。
 
@@ -120,7 +127,7 @@ XIAO_LEGACY_DB_PATH=/root/xiao_a/data.db
 
 ## 8. 说明
 
-本仓库主路径是 OpenClaw-only。若你本地仍保留 `legacy/nonebot` 或 `legacy/openclaw-docker` 目录，仅用于回滚对照，不是推荐部署路径。
+本仓库主路径是 OpenClaw-only。若你本地仍保留 `legacy/legacy-bot` 或 `legacy/openclaw-docker` 目录，仅用于回滚对照，不是推荐部署路径。
 
 ## 9. 可观测性与回归验收
 
@@ -144,6 +151,9 @@ XIAO_LEGACY_DB_PATH=/root/xiao_a/data.db
 - `XIAO_ASR_TIMEOUT_MS=45000`
 - `XIAO_TTS_TIMEOUT_MS=45000`
 - `QWEN_TTS_RATE=1.0` / `QWEN_TTS_PITCH=1.0` / `QWEN_TTS_VOLUME=1.0`
+- `TMDB_API_KEY=...`（电影推荐）
+- `AMAP_KEY=...`（餐厅推荐）
+- `KDNIAO_KEY=...` / `KDNIAO_CUSTOMER=...`（快递查询）
 
 快速验收：
 

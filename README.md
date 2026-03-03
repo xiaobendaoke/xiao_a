@@ -21,7 +21,7 @@
 
 ## 项目概述
 
-小a当前主路径是 **腾讯云服务器上的 OpenClaw（systemd）+ OpenClaw QQ channel**，不是 NoneBot/NapCat 主控。
+小a当前主路径是 **腾讯云服务器上的 OpenClaw（systemd）+ OpenClaw QQ channel**，不是 旧主控栈 主控。
 
 这个仓库的目标是：
 
@@ -43,6 +43,7 @@
 - 天气/股票/GitHub 周榜意图识别与工具引导
 - 链接总结（`xiao_url_digest`）与来源追问（recent links）
 - 命令：`/xiao-health`、`/xiao-whoami`、`/xiao-memory`、`/xiao-links`、`/xiao-reflect`、`/xiao-remind`
+- 扩展命令：`/xiao-persona`、`/xiao-love-score`、`/xiao-plan`、`/xiao-habit`、`/xiao-diary`、`/xiao-game`、`/xiao-greet`
 
 ### 2) 情绪画像（xiao-emotion）
 
@@ -53,6 +54,7 @@
 ### 3) 工具能力（xiao-services）
 
 - 搜索、天气、股票、网页摘要
+- 音乐解析、电影推荐、餐厅推荐、快递追踪
 - 语音 ASR/TTS、图片理解
 - 定时提醒创建
 - 工具调用可观测性字段落地
@@ -244,6 +246,12 @@ XIAO_USER_ALIAS_MAP=qqbot:<当前OpenID>=qqbot:<历史ID>
 - `/xiao-links 5`
 - `/xiao-reflect 24`
 - `/xiao-remind 30 记得喝水`
+- `/xiao-persona list`
+- `/xiao-love-score`
+- `/xiao-plan list`
+- `/xiao-habit list`
+- `/xiao-diary today`
+- `/xiao-game start riddle`
 
 ### 2) 脚本化验收
 
@@ -291,7 +299,7 @@ openclaw cron runs --id <job_id> --limit 5
 
 ## 常见问题
 
-### 1) 现在还需要 NoneBot / NapCat 吗？
+### 1) 现在还需要 LegacyBot / NapCat 吗？
 
 不需要。当前主链路是 OpenClaw QQ channel。
 
@@ -301,7 +309,7 @@ openclaw cron runs --id <job_id> --limit 5
 
 ### 3) 为什么别人容易误判为 Docker 项目？
 
-因为很多旧项目会把历史 Docker/NoneBot 文件和主路径混放。这个仓库主文档和目录已经按 OpenClaw-only 组织。
+因为很多旧项目会把历史 Docker/LegacyBot 文件和主路径混放。这个仓库主文档和目录已经按 OpenClaw-only 组织。
 
 ---
 
@@ -312,4 +320,3 @@ openclaw cron runs --id <job_id> --limit 5
 - 迁移计划：`docs/OPENCLAW_QQ_MIGRATION_PLAN.md`
 - 架构说明：`docs/ARCHITECTURE.md`
 - 发布指引：`docs/GITHUB_PUBLISH_GUIDE.md`
-

@@ -121,6 +121,10 @@ export function envStatus(name?: string): string | Record<string, string> {
         "DASHSCOPE_API_KEY",
         "DEEPSEEK_API_KEY",
         "OPENAI_API_KEY",
+        "TMDB_API_KEY",
+        "AMAP_KEY",
+        "KDNIAO_KEY",
+        "KDNIAO_CUSTOMER",
     ];
     const out: Record<string, string> = {};
     for (const k of keys) {

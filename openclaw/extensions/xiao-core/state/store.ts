@@ -69,6 +69,71 @@ export type CoreState = {
     links: Record<string, LinkEvidence[]>;
     memos: Record<string, MemoEntry[]>;
     githubWeekly: Record<string, GithubWeeklyMark>;
+    plans: Record<string, PlanEntry[]>;
+    habits: Record<string, HabitEntry[]>;
+    diary: Record<string, DiaryEntry[]>;
+    games: Record<string, GameSession | null>;
+    greetings: Record<string, GreetingLog>;
+    persona: Record<string, string>;
+};
+
+export type PlanEntry = {
+    id: string;
+    content: string;
+    when: string;
+    place: string;
+    status: "pending" | "done" | "cancelled" | "expired";
+    remindCount: number;
+    lastRemindTs: number;
+    ts: number;
+    updatedTs: number;
+};
+
+export type HabitEntry = {
+    id: string;
+    name: string;
+    type: string;
+    targetTime: string;
+    targetValue: number;
+    currentStreak: number;
+    maxStreak: number;
+    totalCheckins: number;
+    lastCheckinDate: string;
+    active: boolean;
+    ts: number;
+    updatedTs: number;
+};
+
+export type HabitCheckinResult = {
+    ok: boolean;
+    message: string;
+    habit?: HabitEntry;
+};
+
+export type DiaryEntry = {
+    date: string;
+    mood: number;
+    label: string;
+    note: string;
+    events: string[];
+    ts: number;
+};
+
+export type GameSession = {
+    gameType: "truth_dare" | "love_words" | "riddle" | "qa";
+    status: "playing" | "finished";
+    round: number;
+    score: number;
+    data: Record<string, string>;
+    updatedTs: number;
+};
+
+export type GreetingLog = {
+    morningDates: string[];
+    nightDates: string[];
+    noonDates: string[];
+    lastType: string;
+    lastTs: number;
 };
 
 export const STARTED_AT = Date.now();
@@ -80,6 +145,12 @@ export const DEFAULT_CORE_STATE: CoreState = {
     links: {},
     memos: {},
     githubWeekly: {},
+    plans: {},
+    habits: {},
+    diary: {},
+    games: {},
+    greetings: {},
+    persona: {},
 };
 
 let stateCache: CoreState | null = null;
@@ -132,6 +203,12 @@ export async function ensureStateLoaded(): Promise<CoreState> {
             links: parsed.links && typeof parsed.links === "object" ? parsed.links : {},
             memos: parsed.memos && typeof parsed.memos === "object" ? parsed.memos : {},
             githubWeekly: parsed.githubWeekly && typeof parsed.githubWeekly === "object" ? parsed.githubWeekly : {},
+            plans: parsed.plans && typeof parsed.plans === "object" ? parsed.plans : {},
+            habits: parsed.habits && typeof parsed.habits === "object" ? parsed.habits : {},
+            diary: parsed.diary && typeof parsed.diary === "object" ? parsed.diary : {},
+            games: parsed.games && typeof parsed.games === "object" ? parsed.games : {},
+            greetings: parsed.greetings && typeof parsed.greetings === "object" ? parsed.greetings : {},
+            persona: parsed.persona && typeof parsed.persona === "object" ? parsed.persona : {},
         };
         return stateCache;
     } catch {
@@ -141,6 +218,12 @@ export async function ensureStateLoaded(): Promise<CoreState> {
             links: {},
             memos: {},
             githubWeekly: {},
+            plans: {},
+            habits: {},
+            diary: {},
+            games: {},
+            greetings: {},
+            persona: {},
         };
         return stateCache;
     }
@@ -495,4 +578,312 @@ export async function runDailyReflection(params: {
     }
     await addMemoryNote(userKey, summary, "derived");
     return { ok: true, saved: true, userKey, summary };
+}
+
+function makeEntityId(prefix: string): string {
+    return `${prefix}_${Date.now().toString(36)}_${Math.trunc(Math.random() * 1e6).toString(36)}`;
+}
+
+function dateKey(ts: number = Date.now()): string {
+    return new Date(ts).toISOString().slice(0, 10);
+}
+
+function moodLabel(v: number): string {
+    if (v >= 80) return "超开心";
+    if (v >= 30) return "开心";
+    if (v >= -10) return "一般";
+    if (v >= -50) return "有点低落";
+    return "难过";
+}
+
+export async function setUserPersona(userKey: string, personaKey: string): Promise<boolean> {
+    const normalized = normalizeUserKey(userKey);
+    if (!normalized || !personaKey.trim()) return false;
+    const store = await ensureStateLoaded();
+    store.persona[normalized] = personaKey.trim();
+    await persistState();
+    return true;
+}
+
+export async function getUserPersona(userKey: string): Promise<string> {
+    const store = await ensureStateLoaded();
+    const normalized = normalizeUserKey(userKey);
+    return store.persona[normalized] || "default";
+}
+
+export async function addPlanEntry(
+    userKey: string,
+    content: string,
+    when: string = "",
+    place: string = "",
+): Promise<PlanEntry | null> {
+    const normalized = normalizeUserKey(userKey);
+    const clean = shorten((content || "").trim(), 180);
+    if (!normalized || !clean) return null;
+    const store = await ensureStateLoaded();
+    const arr = store.plans[normalized] || [];
+    const now = Date.now();
+    const entry: PlanEntry = {
+        id: makeEntityId("plan"),
+        content: clean,
+        when: shorten((when || "").trim(), 40),
+        place: shorten((place || "").trim(), 40),
+        status: "pending",
+        remindCount: 0,
+        lastRemindTs: 0,
+        ts: now,
+        updatedTs: now,
+    };
+    arr.push(entry);
+    store.plans[normalized] = arr.slice(-200);
+    await persistState();
+    return entry;
+}
+
+export async function listPlanEntries(userKey: string, status?: PlanEntry["status"]): Promise<PlanEntry[]> {
+    const store = await ensureStateLoaded();
+    const arr = (store.plans[normalizeUserKey(userKey)] || []).slice();
+    const rows = status ? arr.filter((x) => x.status === status) : arr;
+    return rows.sort((a, b) => b.updatedTs - a.updatedTs);
+}
+
+export async function updatePlanStatus(
+    userKey: string,
+    selector: string,
+    status: PlanEntry["status"],
+): Promise<PlanEntry | null> {
+    const normalized = normalizeUserKey(userKey);
+    const sel = (selector || "").trim();
+    if (!normalized || !sel) return null;
+    const store = await ensureStateLoaded();
+    const arr = store.plans[normalized] || [];
+    let idx = arr.findIndex((x) => x.id === sel);
+    if (idx < 0 && /^\d+$/.test(sel)) {
+        const n = Number(sel);
+        const sorted = arr.slice().sort((a, b) => b.updatedTs - a.updatedTs);
+        const target = sorted[n - 1];
+        if (target) {
+            idx = arr.findIndex((x) => x.id === target.id);
+        }
+    }
+    if (idx < 0) return null;
+    arr[idx] = { ...arr[idx], status, updatedTs: Date.now() };
+    store.plans[normalized] = arr;
+    await persistState();
+    return arr[idx];
+}
+
+export async function increasePlanRemindCount(userKey: string, planId: string): Promise<void> {
+    const normalized = normalizeUserKey(userKey);
+    const store = await ensureStateLoaded();
+    const arr = store.plans[normalized] || [];
+    const idx = arr.findIndex((x) => x.id === planId);
+    if (idx < 0) return;
+    const now = Date.now();
+    const next = (arr[idx].remindCount || 0) + 1;
+    arr[idx] = {
+        ...arr[idx],
+        remindCount: next,
+        lastRemindTs: now,
+        status: next >= 5 ? "expired" : arr[idx].status,
+        updatedTs: now,
+    };
+    store.plans[normalized] = arr;
+    await persistState();
+}
+
+export async function upsertHabit(userKey: string, name: string, targetTime: string = ""): Promise<HabitEntry | null> {
+    const normalized = normalizeUserKey(userKey);
+    const clean = shorten((name || "").trim(), 40);
+    if (!normalized || !clean) return null;
+    const store = await ensureStateLoaded();
+    const arr = store.habits[normalized] || [];
+    const now = Date.now();
+    const idx = arr.findIndex((x) => x.name === clean);
+    if (idx >= 0) {
+        arr[idx] = {
+            ...arr[idx],
+            active: true,
+            targetTime: shorten((targetTime || "").trim(), 8) || arr[idx].targetTime,
+            updatedTs: now,
+        };
+        store.habits[normalized] = arr;
+        await persistState();
+        return arr[idx];
+    }
+    const entry: HabitEntry = {
+        id: makeEntityId("habit"),
+        name: clean,
+        type: "custom",
+        targetTime: shorten((targetTime || "").trim(), 8),
+        targetValue: 1,
+        currentStreak: 0,
+        maxStreak: 0,
+        totalCheckins: 0,
+        lastCheckinDate: "",
+        active: true,
+        ts: now,
+        updatedTs: now,
+    };
+    arr.push(entry);
+    store.habits[normalized] = arr.slice(-100);
+    await persistState();
+    return entry;
+}
+
+export async function listHabits(userKey: string, onlyActive: boolean = true): Promise<HabitEntry[]> {
+    const store = await ensureStateLoaded();
+    const arr = (store.habits[normalizeUserKey(userKey)] || []).slice();
+    const rows = onlyActive ? arr.filter((x) => x.active) : arr;
+    return rows.sort((a, b) => b.updatedTs - a.updatedTs);
+}
+
+export async function cancelHabit(userKey: string, selector: string): Promise<HabitEntry | null> {
+    const normalized = normalizeUserKey(userKey);
+    const sel = (selector || "").trim();
+    if (!normalized || !sel) return null;
+    const store = await ensureStateLoaded();
+    const arr = store.habits[normalized] || [];
+    const idx = arr.findIndex((x) => x.id === sel || x.name === sel);
+    if (idx < 0) return null;
+    arr[idx] = { ...arr[idx], active: false, updatedTs: Date.now() };
+    store.habits[normalized] = arr;
+    await persistState();
+    return arr[idx];
+}
+
+export async function checkinHabit(userKey: string, selector: string): Promise<HabitCheckinResult> {
+    const normalized = normalizeUserKey(userKey);
+    const sel = (selector || "").trim();
+    if (!normalized || !sel) return { ok: false, message: "请提供习惯名" };
+    const store = await ensureStateLoaded();
+    const arr = store.habits[normalized] || [];
+    const idx = arr.findIndex((x) => (x.id === sel || x.name === sel) && x.active);
+    if (idx < 0) return { ok: false, message: "没有找到这个习惯" };
+    const today = dateKey();
+    const item = arr[idx];
+    if (item.lastCheckinDate === today) {
+        return { ok: false, message: `今天的${item.name}已经打过卡了` };
+    }
+    const yesterday = dateKey(Date.now() - 86400000);
+    const streak = item.lastCheckinDate === yesterday ? item.currentStreak + 1 : 1;
+    const next: HabitEntry = {
+        ...item,
+        currentStreak: streak,
+        maxStreak: Math.max(streak, item.maxStreak),
+        totalCheckins: item.totalCheckins + 1,
+        lastCheckinDate: today,
+        updatedTs: Date.now(),
+    };
+    arr[idx] = next;
+    store.habits[normalized] = arr;
+    await persistState();
+    return { ok: true, message: `${next.name}打卡成功，连续${next.currentStreak}天`, habit: next };
+}
+
+export async function addDiaryEntry(
+    userKey: string,
+    mood: number,
+    note: string = "",
+    events: string[] = [],
+): Promise<DiaryEntry | null> {
+    const normalized = normalizeUserKey(userKey);
+    if (!normalized) return null;
+    const store = await ensureStateLoaded();
+    const arr = store.diary[normalized] || [];
+    const day = dateKey();
+    const next: DiaryEntry = {
+        date: day,
+        mood: clamp(Number(mood || 0), -100, 100),
+        label: moodLabel(clamp(Number(mood || 0), -100, 100)),
+        note: shorten((note || "").trim(), 180),
+        events: (events || []).map((x) => shorten(x, 40)).slice(0, 8),
+        ts: Date.now(),
+    };
+    const idx = arr.findIndex((x) => x.date === day);
+    if (idx >= 0) {
+        arr[idx] = next;
+    } else {
+        arr.push(next);
+    }
+    arr.sort((a, b) => a.date.localeCompare(b.date));
+    store.diary[normalized] = arr.slice(-90);
+    await persistState();
+    return next;
+}
+
+export async function getDiaryEntries(userKey: string, days: number): Promise<DiaryEntry[]> {
+    const store = await ensureStateLoaded();
+    const arr = (store.diary[normalizeUserKey(userKey)] || []).slice();
+    return arr.slice(-clamp(days, 1, 90));
+}
+
+export async function setGameSession(userKey: string, session: GameSession | null): Promise<void> {
+    const normalized = normalizeUserKey(userKey);
+    if (!normalized) return;
+    const store = await ensureStateLoaded();
+    store.games[normalized] = session;
+    await persistState();
+}
+
+export async function getGameSession(userKey: string): Promise<GameSession | null> {
+    const store = await ensureStateLoaded();
+    return store.games[normalizeUserKey(userKey)] || null;
+}
+
+export async function recordGreeting(userKey: string, greetType: "morning" | "night" | "noon"): Promise<void> {
+    const normalized = normalizeUserKey(userKey);
+    if (!normalized) return;
+    const store = await ensureStateLoaded();
+    const log: GreetingLog = store.greetings[normalized] || {
+        morningDates: [],
+        nightDates: [],
+        noonDates: [],
+        lastType: "",
+        lastTs: 0,
+    };
+    const day = dateKey();
+    const key = greetType === "morning" ? "morningDates" : greetType === "night" ? "nightDates" : "noonDates";
+    const set = new Set(log[key]);
+    set.add(day);
+    log[key] = [...set].slice(-30);
+    log.lastType = greetType;
+    log.lastTs = Date.now();
+    store.greetings[normalized] = log;
+    await persistState();
+}
+
+export async function getGreetingLog(userKey: string): Promise<GreetingLog | null> {
+    const store = await ensureStateLoaded();
+    return store.greetings[normalizeUserKey(userKey)] || null;
+}
+
+export async function getLoveScore(userKey: string): Promise<{
+    score: number;
+    level: string;
+    details: Record<string, number>;
+}> {
+    const normalized = normalizeUserKey(userKey);
+    const store = await ensureStateLoaded();
+    const now = Date.now();
+    const chats = (store.chats[normalized] || []).filter((x) => now - x.ts <= 7 * 86400000);
+    const notes = store.notes[normalized] || [];
+    const moodApprox = (store.greetings[normalized]?.nightDates.length || 0) * 2;
+    const userMsgCount = chats.filter((x) => x.role === "user").length;
+    const freqScore = clamp(Math.round((userMsgCount / 100) * 30), 0, 30);
+    const moodScore = clamp(Math.round(((clamp(moodApprox, -100, 100) + 100) / 200) * 30), 0, 30);
+    const memoryScore = clamp(Math.round((notes.length / 100) * 20), 0, 20);
+    const proactiveScore = clamp(Math.round(((store.githubWeekly[normalized] ? 1 : 0.5) * 20)), 0, 20);
+    const total = clamp(freqScore + moodScore + memoryScore + proactiveScore, 0, 100);
+    const level = total >= 90 ? "灵魂伴侣" : total >= 75 ? "热恋期" : total >= 60 ? "甜蜜期" : total >= 40 ? "平稳期" : "考察期";
+    return {
+        score: total,
+        level,
+        details: {
+            互动频率: freqScore,
+            情绪状态: moodScore,
+            记忆浓度: memoryScore,
+            主动互动: proactiveScore,
+        },
+    };
 }

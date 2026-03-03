@@ -30,6 +30,8 @@ type LegacyMemorySnapshot = {
   recentChats: string[];
 };
 
+type ComfortLevel = "none" | "light" | "normal" | "deep";
+
 const DEFAULT_STORE: EmotionStore = {
   moods: {},
   profiles: {},
@@ -380,6 +382,36 @@ function moodInstruction(value: number): string {
   return "";
 }
 
+const NEGATIVE_KEYWORDS: Record<string, number> = {
+  "难过": 2, "伤心": 2, "想哭": 3, "崩溃": 3, "焦虑": 2, "压力大": 2, "低落": 2, "孤独": 2, "烦": 1, "累": 1,
+};
+
+function detectComfortLevel(text: string, mood: number): { level: ComfortLevel; score: number; matched: string[] } {
+  const t = (text || "").trim().toLowerCase();
+  let score = 0;
+  const matched: string[] = [];
+  for (const [k, w] of Object.entries(NEGATIVE_KEYWORDS)) {
+    if (t.includes(k)) {
+      score += w;
+      matched.push(k);
+    }
+  }
+  if (mood < -40) score += 2;
+  else if (mood < -25) score += 1;
+  if (score >= 5) return { level: "deep", score, matched };
+  if (score >= 3) return { level: "normal", score, matched };
+  if (score >= 1) return { level: "light", score, matched };
+  return { level: "none", score, matched };
+}
+
+function temperHint(text: string): string {
+  const t = (text || "").trim();
+  if (!t) return "";
+  if (/(别的女生|小姐姐|美女|她们)/.test(t)) return "temper_hint=jealous";
+  if (/(打游戏|排位|上分)/.test(t)) return "temper_hint=annoyed";
+  return "";
+}
+
 function formatProfile(profile: Record<string, string> | undefined): string {
   if (!profile || Object.keys(profile).length === 0) {
     return "none";
@@ -543,6 +575,11 @@ const xiaoEmotionPlugin = {
       }
       lines.push(`mood_value=${mood}`);
       lines.push(`mood_desc=${moodDescription(mood)}`);
+      const comfort = detectComfortLevel(event.prompt || "", mood);
+      lines.push(`comfort_level=${comfort.level}`);
+      if (comfort.matched.length > 0) {
+        lines.push(`comfort_keywords=${comfort.matched.join(",")}`);
+      }
       lines.push(`profile=${formatProfile(mergedProfile)}`);
       if (legacy?.insights.length) {
         lines.push(`legacy_insights=${legacy.insights.join(" | ")}`);
@@ -569,6 +606,17 @@ const xiaoEmotionPlugin = {
       // 安静时段下追加更短更轻的回复要求
       if (quietMode) {
         lines.push("当前在安静时段：回复更短、更轻声。");
+      }
+      if (comfort.level === "light") {
+        lines.push("用户情绪略低落：请优先共情，回复更温柔一些。");
+      } else if (comfort.level === "normal") {
+        lines.push("用户情绪中度低落：先共情再建议，不要说教。");
+      } else if (comfort.level === "deep") {
+        lines.push("用户情绪明显低落：请重点安慰，语气稳定，必要时提醒照顾好自己。");
+      }
+      const temper = temperHint(event.prompt || "");
+      if (temper) {
+        lines.push(temper);
       }
 
       return {

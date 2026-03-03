@@ -130,6 +130,67 @@ export function hasSourceFollowupIntent(input: string): boolean {
     return keys.some((k) => t.includes(k));
 }
 
+export function detectGreetingType(input: string): "morning" | "night" | "noon" | null {
+    const t = (input || "").trim().toLowerCase();
+    if (!t) return null;
+    const morning = ["早安", "早上好", "早呀", "起床", "醒了", "早"];
+    const night = ["晚安", "睡觉", "困了", "休息", "明天见", "下线"];
+    const noon = ["午安", "中午好", "午休", "吃午饭"];
+    if (night.some((k) => t.includes(k))) return "night";
+    if (morning.some((k) => t.includes(k))) return "morning";
+    if (noon.some((k) => t.includes(k))) return "noon";
+    return null;
+}
+
+export function extractPlanIntent(input: string): { content: string; when: string; place: string } | null {
+    const t = (input || "").trim();
+    if (!t) return null;
+    const hasPlanWord = /(下次|改天|周末|有空|一起去|约|安排|计划)/.test(t);
+    if (!hasPlanWord) return null;
+    const when = (t.match(/(下次|改天|周末|明天|后天|这周|下周|有空的时候)/)?.[1] || "").trim();
+    const place = (t.match(/去([\p{Script=Han}A-Za-z0-9]{2,20})/u)?.[1] || "").trim();
+    return {
+        content: shorten(t, 160),
+        when,
+        place,
+    };
+}
+
+export function hasHabitIntent(input: string): boolean {
+    const t = (input || "").trim();
+    return /(打卡|监督我|习惯|坚持|签到)/.test(t);
+}
+
+export function hasDiaryIntent(input: string): boolean {
+    const t = (input || "").trim();
+    return /(心情日记|记一下心情|今天心情|写日记)/.test(t);
+}
+
+export function hasGameIntent(input: string): boolean {
+    const t = (input || "").trim().toLowerCase();
+    return /(真心话|大冒险|情话接龙|猜谜|谜语|玩游戏|游戏)/.test(t);
+}
+
+export function hasMusicIntent(input: string): boolean {
+    const t = (input || "").toLowerCase();
+    return /(music\.163\.com|y\.qq\.com|qqmusic|网易云|听歌|歌曲)/.test(t);
+}
+
+export function hasMovieIntent(input: string): boolean {
+    const t = (input || "").trim();
+    return /(电影|剧集|推荐.*电影|看什么片)/.test(t);
+}
+
+export function hasRestaurantIntent(input: string): boolean {
+    const t = (input || "").trim();
+    return /(餐厅|吃什么|饭店|馆子|美食推荐)/.test(t);
+}
+
+export function hasExpressIntent(input: string): boolean {
+    const t = (input || "").trim();
+    return /(快递|物流|运单|单号)/.test(t);
+}
+
 export function parseReminderArgs(raw: string): { minutes: number; content: string } | null {
     const text = (raw || "").trim();
     if (!text) {
