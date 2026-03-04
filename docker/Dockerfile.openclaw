@@ -1,0 +1,26 @@
+FROM node:22-bookworm-slim
+
+ENV OPENCLAW_HOME=/home/openclaw
+ENV PATH=/home/openclaw/.npm-global/bin:${PATH}
+
+USER root
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends rsync ca-certificates git \
+  && rm -rf /var/lib/apt/lists/*
+
+RUN useradd -m -s /bin/bash openclaw \
+  && mkdir -p /home/openclaw/.npm-global \
+  && chown -R openclaw:openclaw /home/openclaw
+
+USER openclaw
+WORKDIR /home/openclaw
+
+RUN npm config set prefix /home/openclaw/.npm-global \
+  && npm install -g openclaw
+
+WORKDIR /app
+
+COPY --chown=openclaw:openclaw openclaw/openclaw.json /opt/openclaw-seed/openclaw.json
+COPY --chown=openclaw:openclaw openclaw/extensions /opt/openclaw-seed/extensions
+
+CMD ["openclaw", "gateway"]

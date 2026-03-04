@@ -2,6 +2,7 @@ import type { OpenClawPluginApi, AnyAgentTool } from "openclaw/plugin-sdk";
 import { applyAlias, normalizeUserKey } from "../shared/identity.js";
 import { clamp, shorten } from "../shared/text.js";
 import { envStatus } from "../shared/env.js";
+import { assertAllowedChannel } from "../shared/channel.js";
 
 // Core utils/state imports
 import { inferRecipientId, resolveUserKeyFromPrompt } from "./utils/intent.js";
@@ -132,6 +133,11 @@ const xiaoCorePlugin = {
   configSchema: emptyPluginConfigSchema(),
   register(api: OpenClawPluginApi) {
     api.on("before_agent_start", async (event, ctx) => {
+      const channelCheck = assertAllowedChannel(ctx.channel);
+      if (!channelCheck.ok) {
+        throw new Error(`xiao-core blocked request: ${channelCheck.reason}`);
+      }
+
       const now = Date.now();
       sweepSessionCache(now);
       sweepPendingUrlCache(now);
@@ -240,6 +246,11 @@ const xiaoCorePlugin = {
       } else {
         lines.push("当前角色：默认小a亲密陪伴模式。");
       }
+      const replyMaxChars = parseInt(process.env.XIAO_REPLY_MAX_CHARS || "90", 10);
+      const boundedReplyMaxChars = Number.isFinite(replyMaxChars) ? Math.min(Math.max(replyMaxChars, 40), 220) : 90;
+      lines.push(
+        `回复预算：默认2-3行、尽量不超过${boundedReplyMaxChars}字；保留亲密口吻但避免冗长寒暄。`,
+      );
       if (mapped.aliasFrom) {
         lines.push(`user_key_alias_from=${mapped.aliasFrom}`);
       }
@@ -420,6 +431,14 @@ const xiaoCorePlugin = {
     });
 
     api.on("message_sending", async (_event, ctx) => {
+      const sendingCtx = ctx as { channelId?: string; channel?: string };
+      const channelCheck = assertAllowedChannel(sendingCtx.channelId || sendingCtx.channel);
+      if (!channelCheck.ok) {
+        return {
+          content: "当前实例未授权该通道，消息已拦截。",
+        };
+      }
+
       const content = typeof _event.content === "string" ? _event.content : "";
       if (!content.trim()) {
         return;

@@ -32,7 +32,7 @@ Usage:
 Options:
   --apply                     Apply changes (default is dry-run)
   --remove                    Remove migrated jobs for the resolved target
-  --auto-target               Auto-detect latest QQ direct target from openclaw status
+  --auto-target               Auto-detect latest QQ target from openclaw status
   --target <qqbot:c2c:ID>     Explicit delivery target
   --weather-city <city>       Weather push city (default: 上海)
   --weather-time <HH:MM>      Weather push local time (default: 08:20)
@@ -61,6 +61,9 @@ Examples:
   scripts/openclaw_migrate_scheduler.sh --apply --auto-target --github-day sun --github-time 20:30
   scripts/openclaw_migrate_scheduler.sh --apply --auto-target --info-digest 0
   scripts/openclaw_migrate_scheduler.sh --apply --target qqbot:c2c:483a... --weather-city 上海
+
+Env fallback:
+  XIAO_DEFAULT_TARGET=qqbot:c2c:<openid> or qqbot:group:<groupid>
 USAGE
 }
 
@@ -181,6 +184,54 @@ json_payload() {
   sed -n '/^[[:space:]]*{/,$p'
 }
 
+is_valid_target() {
+  local t="$1"
+  [[ "$t" =~ ^qqbot:(c2c|group):[A-Za-z0-9._:-]{6,128}$ ]]
+}
+
+print_recent_session_keys() {
+  local raw="$1"
+  printf '%s\n' "$raw" \
+    | json_payload \
+    | jq -r '.sessions.recent[]?.key // empty' \
+    | head -n 8
+}
+
+resolve_auto_target() {
+  local raw="$1"
+  local resolved=""
+
+  resolved="$(
+    printf '%s\n' "$raw" \
+      | json_payload \
+      | jq -r --arg a "$AGENT_ID" '
+          .sessions.recent[]?.key // empty
+          | if startswith("agent:" + $a + ":qqbot:direct:") then
+              "qqbot:c2c:" + (split(":")[-1])
+            elif startswith("agent:" + $a + ":qqbot:c2c:") then
+              "qqbot:c2c:" + (split(":")[-1])
+            elif startswith("agent:" + $a + ":qqbot:group:") then
+              "qqbot:group:" + (split(":")[-1])
+            else empty end
+        ' \
+      | head -n 1
+  )"
+
+  if [[ -n "$resolved" && "$resolved" != "null" ]]; then
+    printf '%s' "$resolved"
+    return 0
+  fi
+
+  local fallback="${XIAO_DEFAULT_TARGET:-}"
+  if [[ -n "$fallback" ]] && is_valid_target "$fallback"; then
+    echo "[info] auto-target not found, fallback to XIAO_DEFAULT_TARGET=${fallback}" >&2
+    printf '%s' "$fallback"
+    return 0
+  fi
+
+  return 1
+}
+
 parse_hhmm() {
   local value="$1"
   if [[ ! "$value" =~ ^([01][0-9]|2[0-3]):([0-5][0-9])$ ]]; then
@@ -192,23 +243,21 @@ parse_hhmm() {
 
 if [[ "$AUTO_TARGET" -eq 1 && -z "$TARGET" ]]; then
   STATUS_RAW="$(openclaw status --json 2>/dev/null || true)"
-  TARGET_ID="$(
-    printf '%s\n' "$STATUS_RAW" \
-      | json_payload \
-      | jq -r '.sessions.recent[]?.key | select(startswith("agent:main:qqbot:direct:")) | split(":")[-1]' \
-      | head -n1
-  )"
-  if [[ -n "$TARGET_ID" && "$TARGET_ID" != "null" ]]; then
-    TARGET="qqbot:c2c:${TARGET_ID}"
+  if TARGET="$(resolve_auto_target "$STATUS_RAW")"; then
+    :
+  else
+    echo "Auto target detection failed: no recent qqbot direct/group session for agent=${AGENT_ID}." >&2
+    echo "Recent session keys (top 8):" >&2
+    print_recent_session_keys "$STATUS_RAW" >&2 || true
   fi
 fi
 
 if [[ -z "$TARGET" ]]; then
-  echo "Target is required. Use --target or --auto-target." >&2
+  echo "Target is required. Use --target, --auto-target, or set XIAO_DEFAULT_TARGET." >&2
   exit 1
 fi
 
-if [[ ! "$TARGET" =~ ^qqbot:(c2c|group):[A-Za-z0-9._:-]{6,128}$ ]]; then
+if ! is_valid_target "$TARGET"; then
   echo "Invalid target format: $TARGET" >&2
   echo "Expected: qqbot:c2c:<openid> or qqbot:group:<groupid>" >&2
   exit 1

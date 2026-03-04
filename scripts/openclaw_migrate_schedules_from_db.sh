@@ -16,7 +16,7 @@ Usage:
 
 Options:
   --apply                     Apply changes (default dry-run)
-  --auto-target               Auto-detect latest QQ direct target from openclaw status
+  --auto-target               Auto-detect latest QQ target from openclaw status
   --target <qqbot:c2c:ID>     Override target for all imported reminders
   --db <path>                 SQLite DB path (default: /root/xiao_a/data.db)
   --agent <id>                Agent id (default: main)
@@ -28,6 +28,9 @@ Examples:
   scripts/openclaw_migrate_schedules_from_db.sh
   scripts/openclaw_migrate_schedules_from_db.sh --apply
   scripts/openclaw_migrate_schedules_from_db.sh --apply --auto-target --mark-cancelled
+
+Env fallback:
+  XIAO_DEFAULT_TARGET=qqbot:c2c:<openid> or qqbot:group:<groupid>
 USAGE
 }
 
@@ -88,6 +91,43 @@ json_payload() {
   sed -n '/^[[:space:]]*{/,$p'
 }
 
+is_valid_target() {
+  local t="$1"
+  [[ "$t" =~ ^qqbot:(c2c|group):[A-Za-z0-9._:-]{6,128}$ ]]
+}
+
+resolve_auto_target() {
+  local raw="$1"
+  local resolved=""
+  resolved="$(
+    printf '%s\n' "$raw" \
+      | json_payload \
+      | jq -r --arg a "$AGENT_ID" '
+          .sessions.recent[]?.key // empty
+          | if startswith("agent:" + $a + ":qqbot:direct:") then
+              "qqbot:c2c:" + (split(":")[-1])
+            elif startswith("agent:" + $a + ":qqbot:c2c:") then
+              "qqbot:c2c:" + (split(":")[-1])
+            elif startswith("agent:" + $a + ":qqbot:group:") then
+              "qqbot:group:" + (split(":")[-1])
+            else empty end
+        ' \
+      | head -n1
+  )"
+  if [[ -n "$resolved" && "$resolved" != "null" ]]; then
+    printf '%s' "$resolved"
+    return 0
+  fi
+
+  local fallback="${XIAO_DEFAULT_TARGET:-}"
+  if [[ -n "$fallback" ]] && is_valid_target "$fallback"; then
+    echo "[info] auto-target not found, fallback to XIAO_DEFAULT_TARGET=${fallback}" >&2
+    printf '%s' "$fallback"
+    return 0
+  fi
+  return 1
+}
+
 if [[ ! -f "$DB_PATH" ]]; then
   echo "DB file not found: $DB_PATH" >&2
   exit 1
@@ -95,18 +135,14 @@ fi
 
 if [[ "$AUTO_TARGET" -eq 1 && -z "$TARGET" ]]; then
   STATUS_RAW="$(openclaw status --json 2>/dev/null || true)"
-  TARGET_ID="$(
-    printf '%s\n' "$STATUS_RAW" \
-      | json_payload \
-      | jq -r '.sessions.recent[]?.key | select(startswith("agent:main:qqbot:direct:")) | split(":")[-1]' \
-      | head -n1
-  )"
-  if [[ -n "$TARGET_ID" && "$TARGET_ID" != "null" ]]; then
-    TARGET="qqbot:c2c:${TARGET_ID}"
+  if TARGET="$(resolve_auto_target "$STATUS_RAW")"; then
+    :
+  else
+    echo "[warn] auto-target not found; will fallback to row user_id mapping (qqbot:c2c:<user_id>)." >&2
   fi
 fi
 
-if [[ -n "$TARGET" && ! "$TARGET" =~ ^qqbot:(c2c|group):[A-Za-z0-9._:-]{6,128}$ ]]; then
+if [[ -n "$TARGET" ]] && ! is_valid_target "$TARGET"; then
   echo "Invalid target format: $TARGET" >&2
   exit 1
 fi

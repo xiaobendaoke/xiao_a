@@ -49,3 +49,4 @@ docker-compose.openclaw.yml
 __MACOSX/
 *.qqxlog
 *.mmap3
+env.channel.qq

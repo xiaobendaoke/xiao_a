@@ -10,6 +10,7 @@ import { promisify } from "node:util";
 import { env, envAny } from "../shared/env.js";
 import { errToString, clamp } from "../shared/text.js";
 import { fetchJson, fetchJsonByCurl, fetchTextByCurl } from "../shared/request.js";
+import { assertAllowedChannel, getPrimaryChannel } from "../shared/channel.js";
 
 // Feature modules
 import { normalizeStockSymbol, fetchStockEastmoney, fetchStockSina } from "./features/stock.js";
@@ -1345,7 +1346,7 @@ const xiaoServicesPlugin = {
         const to = (params.to || "").trim();
         const message = (params.message || "").trim();
         const minutesFromNow = clamp(Number(params.minutesFromNow || 0), 1, 43200);
-        const channel = (params.channel || "").trim() || "qqbot";
+        const channel = (params.channel || "").trim().toLowerCase() || getPrimaryChannel();
 
         if (!to) {
           return await obsWrap("xiao_schedule_reminder", obsUser, obsStart, {
@@ -1357,6 +1358,14 @@ const xiaoServicesPlugin = {
           return await obsWrap("xiao_schedule_reminder", obsUser, obsStart, {
             ok: false,
             error: "message is required",
+          });
+        }
+        const channelCheck = assertAllowedChannel(channel);
+        if (!channelCheck.ok) {
+          return await obsWrap("xiao_schedule_reminder", obsUser, obsStart, {
+            ok: false,
+            error: channelCheck.reason,
+            channel,
           });
         }
 

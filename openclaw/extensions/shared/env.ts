@@ -114,6 +114,8 @@ export function envStatus(name?: string): string | Record<string, string> {
         return statusText(name.trim());
     }
     const keys = [
+        "XIAO_ALLOWED_CHANNELS",
+        "XIAO_PRIMARY_CHANNEL",
         "OPENCLAW_GATEWAY_TOKEN",
         "XIAO_USER_ALIAS_MAP",
         "XIAO_PERSONA_PROMPT_FILE",

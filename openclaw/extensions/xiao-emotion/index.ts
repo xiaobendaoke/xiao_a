@@ -5,6 +5,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
+import { assertAllowedChannel } from "../shared/channel.js";
 
 type MoodEntry = {
   value: number;
@@ -546,6 +547,11 @@ const xiaoEmotionPlugin = {
 
     // 挂载 Agent 启动前置钩子：在 LLM 生成回复前，注入情绪、记忆与画像上下文
     api.on("before_agent_start", async (event, ctx) => {
+      const channelCheck = assertAllowedChannel(ctx.channel);
+      if (!channelCheck.ok) {
+        throw new Error(`xiao-emotion blocked request: ${channelCheck.reason}`);
+      }
+
       // 通过上下文反解析真实用户标识，并应用当前别名映射获取统一身份
       const resolvedKey = resolveUserKeyFromPrompt(event.prompt || "", ctx.sessionKey);
       const userKey = applyUserAlias(resolvedKey);
@@ -626,6 +632,13 @@ const xiaoEmotionPlugin = {
 
     // 挂载消息发送钩子：拦截并解析 LLM 返回数据中可能潜藏的状态变更标签
     api.on("message_sending", async (event, ctx) => {
+      const channelCheck = assertAllowedChannel(ctx.channelId || ctx.channel);
+      if (!channelCheck.ok) {
+        return {
+          content: "当前实例未授权该通道，消息已拦截。",
+        };
+      }
+
       const content = typeof event.content === "string" ? event.content : "";
       if (!content) {
         return;

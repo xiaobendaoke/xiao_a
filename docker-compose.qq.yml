@@ -1,0 +1,24 @@
+services:
+  openclaw-qq:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.openclaw
+    container_name: openclaw-qq
+    restart: unless-stopped
+    env_file:
+      - env.channel.qq
+    ports:
+      - "18790:18789"
+    volumes:
+      - openclaw_qq_home:/home/openclaw/.openclaw
+    command:
+      - bash
+      - -lc
+      - |
+        mkdir -p /home/openclaw/.openclaw/extensions
+        cp -f /opt/openclaw-seed/openclaw.json /home/openclaw/.openclaw/openclaw.json
+        rsync -a --delete /opt/openclaw-seed/extensions/ /home/openclaw/.openclaw/extensions/
+        /home/openclaw/.npm-global/bin/openclaw gateway
+
+volumes:
+  openclaw_qq_home:
